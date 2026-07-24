@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# 原始素材压缩包解压目录(public/models 已含游戏所需副本)
+assets/
+kenney_modular-space-kit_1.0*/
+
+# 开发辅助页面(非游戏运行必需)
+dedup.html
+
+# 本地缓存/临时
+tools/bounds.json
+.vite/

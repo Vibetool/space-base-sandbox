@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head><meta charset="UTF-8"><title>道路瓦片总览</title>
+<style>
+  body { background: #223; margin: 0; font-family: monospace; }
+  #grid { display: grid; grid-template-columns: repeat(4, 190px); gap: 3px; padding: 4px; }
+  .cell { position: relative; width: 190px; height: 190px; background: #334; }
+  .cell img { width: 100%; height: 100%; }
+  .cell span { position: absolute; left: 2px; bottom: 2px; color: #ff0; font-size: 14px; font-weight: bold; text-shadow: 0 0 3px #000; }
+</style></head>
+<body>
+<div id="grid"></div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const r = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+r.setSize(190, 190);
+const scene = new THREE.Scene();
+scene.add(new THREE.HemisphereLight(0xffffff, 0x556677, 1.3));
+const dl = new THREE.DirectionalLight(0xffffff, 1.4);
+dl.position.set(4, 8, 5);
+scene.add(dl);
+const cam = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+const loader = new GLTFLoader();
+const grid = document.getElementById('grid');
+
+const q = new URLSearchParams(location.search);
+const from = +(q.get('from') || 1), to = Math.min(302, +(q.get('to') || 302));
+// 支持 "n:rot" 条目(rot 为 90° 步数),标注北向便于读朝向
+const list = (q.get('list') ? q.get('list').split(',') : Array.from({ length: to - from + 1 }, (_, i) => String(from + i)));
+for (const entry of list) {
+  const [nStr, rotStr] = entry.split(':');
+  const n = Number(nStr), rot = Number(rotStr || 0);
+  const id = String(n).padStart(3, '0');
+  try {
+    const gltf = await loader.loadAsync(`/models/roads/roadTile_${id}.gltf`);
+    const obj = gltf.scene;
+    obj.rotation.y = rot * Math.PI / 2;
+    scene.add(obj);
+    obj.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(obj);
+    const c = box.getCenter(new THREE.Vector3());
+    const s = box.getSize(new THREE.Vector3());
+    const rad = Math.max(s.x, s.y, s.z) * 1.55 + 0.4;
+    cam.position.set(c.x, c.y + rad, c.z + 0.001); // 正上方俯视(+z 朝下=南,上=北 -z)
+    cam.lookAt(c);
+    r.render(scene, cam);
+    const div = document.createElement('div');
+    div.className = 'cell';
+    div.innerHTML = `<img src="${r.domElement.toDataURL()}"><span>${n}:${rot}</span>`;
+    grid.appendChild(div);
+    scene.remove(obj);
+  } catch (e) {
+    const n = 0;
+    const div = document.createElement('div');
+    div.className = 'cell';
+    div.innerHTML = `<span>${n} ERR</span>`;
+    grid.appendChild(div);
+  }
+}
+document.title = '完成 ' + grid.children.length;
+</script>
+</body>
+</html>
