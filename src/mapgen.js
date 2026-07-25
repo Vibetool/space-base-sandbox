@@ -12,8 +12,8 @@ const WATER_Y = -0.15; // 水面高度(低于铺装顶 0.84,形成下沉渠;高�
 
 const T = {
   base: 64,                   // 米黄铺装(打底)
-  roadEW: { n: 104, rot: 0 }, // 深色沥青直路 东西
-  roadNS: { n: 104, rot: 1 }, // 深色沥青直路 南北
+  roadEW: { n: 104, rot: 0 }, // 整格宽直路 东西(路口干净)
+  roadNS: { n: 104, rot: 1 }, // 整格宽直路 南北
   curve: 112,                 // 整格宽圆角弯道(与 104 同宽;rot0=西南,rot1=南东,rot2=东北,rot3=北西)
   cross: { n: 58, rot: 0 },   // 实心路面(路口)
   grassFlat: 163,             // 平草地(铺在地面)
@@ -21,6 +21,7 @@ const T = {
   slope: 152,                 // 草地直坡
   slopeCorner: 151,           // 草地坡角
   water: 176,                 // 开阔水面(各方向无缝相连,做连续下沉河道)
+  bankEdge: 274,              // 河岸块(带白色路缘,白边朝水)
   trees: [19, 20],            // 树
 };
 // 河道下沉深度:水面顶(-0.24+0.6=0.36)低于米黄顶(0.84),形成 ~0.5 深、带米黄墙的连续河道
@@ -98,13 +99,17 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
       steps++;
     }
   }
-  // 起点在边界上,朝内走
-  const edges = [
-    { si: -R, sj: -R + 4 + Math.floor(rng() * (R)), dir: 'E' },
-    { si: -R + 5 + Math.floor(rng() * R), sj: -R, dir: 'S' },
-  ];
-  const roadCount = 1 + Math.floor(rng() * 2);
-  for (let k = 0; k < roadCount; k++) { const e = edges[k % edges.length]; walkRoad(e.si, e.sj, e.dir); }
+  // 多条主干道,起点分布在四条边、朝内走(道路更密)
+  const roadCount = 4 + Math.floor(rng() * 3); // 4~6 条
+  for (let k = 0; k < roadCount; k++) {
+    const side = k % 4;
+    let si, sj, dir;
+    if (side === 0) { si = -R; sj = -R + 3 + Math.floor(rng() * (R * 2 - 6)); dir = 'E'; }
+    else if (side === 1) { si = R - 1; sj = -R + 3 + Math.floor(rng() * (R * 2 - 6)); dir = 'W'; }
+    else if (side === 2) { si = -R + 3 + Math.floor(rng() * (R * 2 - 6)); sj = -R; dir = 'S'; }
+    else { si = -R + 3 + Math.floor(rng() * (R * 2 - 6)); sj = R - 1; dir = 'N'; }
+    walkRoad(si, sj, dir);
+  }
   // 道路叠在米黄底/运河之上(不替换底,弯道镂空处露出铺装;过河=桥)
   for (const [key] of roadCells) { if (river.has(key)) bridges++; road.add(key); }
 
@@ -114,51 +119,60 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     return true;
   };
 
-  // 4) 抬升绿草丘:多层梯田(对标示范图,每层升高 1.65,内缩成台阶)
-  const TIER = 1.65, STEP = 2; // 每层高度;每层向内缩 STEP 格
-  // 在矩形 [x0,x0+ww)×[z0,z0+dd) 边界铺朝外的草坡(y 为该层底高)
-  const ringSlopes = (x0, z0, ww, dd, y) => {
-    for (let i = x0; i < x0 + ww; i++) {
-      for (let j = z0; j < z0 + dd; j++) {
-        if (i > x0 && i < x0 + ww - 1 && j > z0 && j < z0 + dd - 1) continue; // 只铺边
-        const N = j === z0, S = j === z0 + dd - 1, W = i === x0, E = i === x0 + ww - 1;
-        grass.add(`${i},${j}`);
-        if (N && W) put(i, j, T.slopeCorner, CORNER_ROT.NW, y);
-        else if (N && E) put(i, j, T.slopeCorner, CORNER_ROT.NE, y);
-        else if (S && W) put(i, j, T.slopeCorner, CORNER_ROT.SW, y);
-        else if (S && E) put(i, j, T.slopeCorner, CORNER_ROT.SE, y);
-        else if (N) put(i, j, T.slope, SIDE_ROT.N, y);
-        else if (S) put(i, j, T.slope, SIDE_ROT.S, y);
-        else if (W) put(i, j, T.slope, SIDE_ROT.W, y);
-        else if (E) put(i, j, T.slope, SIDE_ROT.E, y);
-      }
-    }
-  };
+  // 4) 抬升绿草丘:不规则轮廓 + 多层梯田(基于腐蚀层级,每层升高 1.65)
+  const TIER = 1.65, STEP = 2, MAXTIER = 3;
   const plateaus = [];
   const hillCount = 4 + Math.floor(rng() * 3);
   for (let h = 0; h < hillCount; h++) {
-    const w = 6 + Math.floor(rng() * 4), d = 6 + Math.floor(rng() * 4);
-    let ci, cj, tries = 0, ok = false;
+    const bw = 5 + Math.floor(rng() * 4), bd = 5 + Math.floor(rng() * 4);
+    let bi, bj, tries = 0, ok = false;
     while (tries++ < 160 && !ok) {
-      ci = Math.floor(rng() * (R * 2 - w)) - R;
-      cj = Math.floor(rng() * (R * 2 - d)) - R;
-      ok = freeRect(ci, cj, w, d);
+      bi = Math.floor(rng() * (R * 2 - bw)) - R;
+      bj = Math.floor(rng() * (R * 2 - bd)) - R;
+      ok = freeRect(bi - 1, bj - 1, bw + 2, bd + 2); // 主矩形四周留 1 格空
     }
     if (!ok) continue;
-    const levels = 2 + (Math.min(w, d) >= 9 ? 1 : 0); // 大丘 3 层,否则 2 层
-    // 逐层:先把该层矩形内部整体铺成该层顶面的高台,再把边铺成朝外的坡;内层覆盖外层内部
-    for (let L = 0; L < levels; L++) {
-      const x0 = ci + L * STEP, z0 = cj + L * STEP;
-      const ww = w - 2 * L * STEP, dd = d - 2 * L * STEP;
-      if (ww < 2 || dd < 2) break;
-      const y = L * TIER;
-      for (let i = x0; i < x0 + ww; i++) for (let j = z0; j < z0 + dd; j++) { put(i, j, T.plateau, 0, y); grass.add(`${i},${j}`); }
-      ringSlopes(x0, z0, ww, dd, y);
+    // 不规则轮廓:主矩形 + 1~2 个交叠附加块(制造 L/凸起),只取 free 且相连的格
+    const cellsSet = new Set();
+    const addRect = (x0, z0, w, d) => {
+      for (let i = x0; i < x0 + w; i++) for (let j = z0; j < z0 + d; j++) if (free(i, j)) cellsSet.add(`${i},${j}`);
+    };
+    addRect(bi, bj, bw, bd);
+    for (let p = 0, pn = 1 + Math.floor(rng() * 2); p < pn; p++) {
+      const pw = 3 + Math.floor(rng() * 3), pd = 3 + Math.floor(rng() * 3);
+      addRect(bi + Math.floor(rng() * bw) - 1, bj + Math.floor(rng() * bd) - 1, pw, pd);
     }
-    // 记录最内层平台范围(种树用)
-    const topL = Math.min(levels, Math.floor((Math.min(w, d) - 2) / (2 * STEP)) + 1) - 1;
-    const tw = w - 2 * topL * STEP, td = d - 2 * topL * STEP;
-    plateaus.push({ ci: ci + topL * STEP + 1, cj: cj + topL * STEP + 1, w: Math.max(0, tw - 2), d: Math.max(0, td - 2), full: { ci, cj, w, d } });
+    const hillCells = [...cellsSet];
+    if (hillCells.length < 8) continue;
+    const inHill = (k) => cellsSet.has(k);
+    for (const k of hillCells) grass.add(k);
+    // 腐蚀求 rawLevel(到边界的层数)
+    const raw = new Map();
+    let cur = new Set(hillCells), L = 1;
+    while (cur.size) {
+      for (const k of cur) raw.set(k, L);
+      const next = new Set();
+      for (const k of cur) {
+        const [i, j] = k.split(',').map(Number);
+        if (cur.has(`${i + 1},${j}`) && cur.has(`${i - 1},${j}`) && cur.has(`${i},${j + 1}`) && cur.has(`${i},${j - 1}`)) next.add(k);
+      }
+      cur = next; L++;
+    }
+    const tierOf = (k) => (inHill(k) ? Math.min(MAXTIER, Math.floor((raw.get(k) - 1) / STEP) + 1) : 0);
+    for (const k of hillCells) {
+      const [i, j] = k.split(',').map(Number);
+      const Tc = tierOf(k), y = (Tc - 1) * TIER;
+      const lo = { E: tierOf(`${i + 1},${j}`) < Tc, W: tierOf(`${i - 1},${j}`) < Tc, S: tierOf(`${i},${j + 1}`) < Tc, N: tierOf(`${i},${j - 1}`) < Tc };
+      const dirs = ['E', 'W', 'S', 'N'].filter((d) => lo[d]);
+      if (dirs.length === 0) put(i, j, T.plateau, 0, y);
+      else if (dirs.length === 1) put(i, j, T.slope, SIDE_ROT[dirs[0]], y);
+      else if (dirs.length === 2 && lo.N && lo.E) put(i, j, T.slopeCorner, CORNER_ROT.NE, y);
+      else if (dirs.length === 2 && lo.N && lo.W) put(i, j, T.slopeCorner, CORNER_ROT.NW, y);
+      else if (dirs.length === 2 && lo.S && lo.W) put(i, j, T.slopeCorner, CORNER_ROT.SW, y);
+      else if (dirs.length === 2 && lo.S && lo.E) put(i, j, T.slopeCorner, CORNER_ROT.SE, y);
+      else put(i, j, T.slope, SIDE_ROT[dirs[0]], y); // 相对两向/尖角:用坡
+    }
+    plateaus.push({ cells: hillCells });
   }
 
   // 5) 平地绿地:3~5 片平草地铺在地面(不抬升),也种树
@@ -175,6 +189,16 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     if (!ok) continue;
     flats.push({ ci, cj, w, d });
     for (let i = ci; i < ci + w; i++) for (let j = cj; j < cj + d; j++) { put(i, j, T.grassFlat); grass.add(`${i},${j}`); }
+  }
+
+  // 5.5) 河岸白边:河道相邻的米黄格换成带白色路缘的岸块(白边朝水)
+  for (const key of river) {
+    const [i, j] = key.split(',').map(Number);
+    for (const [di, dj, rot] of [[0, -1, 0], [0, 1, 0], [1, 0, 1], [-1, 0, 1]]) {
+      const nk = `${i + di},${j + dj}`;
+      if (river.has(nk) || !inb(i + di, j + dj)) continue;
+      if (cells.get(nk)?.n === T.base) put(i + di, j + dj, T.bankEdge, rot);
+    }
   }
 
   // 6) 放置:先铺底(米黄/运河/草),再把道路叠在其上(struct 层)
@@ -216,12 +240,11 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     if (rec) { builder._genUids.push(rec.uid); trees++; }
   };
   // 草丘:只在平台(flat)格上种树(斜坡上不种),各层都种
-  for (const p of plateaus) {
-    const f = p.full;
-    for (let i = f.ci; i < f.ci + f.w; i++)
-      for (let j = f.cj; j < f.cj + f.d; j++)
-        if (at(i, j)?.n === T.plateau && rng() < 0.6) await treeAt(i, j);
-  }
+  for (const p of plateaus)
+    for (const k of p.cells) {
+      const [i, j] = k.split(',').map(Number);
+      if (at(i, j)?.n === T.plateau && rng() < 0.6) await treeAt(i, j);
+    }
   for (const { ci, cj, w, d } of flats)
     for (let i = ci; i < ci + w; i++)
       for (let j = cj; j < cj + d; j++)
