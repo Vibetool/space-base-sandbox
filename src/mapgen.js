@@ -13,11 +13,11 @@ const T = {
   plateau: 169,               // 抬升草地块 (0→1.65)
   slope: 152,                 // 草地直坡
   slopeCorner: 151,           // 草地坡角
-  riverNS: { n: 215, rot: 0 },// 南北运河(蓝水+矮堤)
-  riverEW: { n: 215, rot: 1 },// 东西运河
-  pool: 176,                  // 开阔水面(池塘)
+  water: 176,                 // 开阔水面(各方向无缝相连,做连续下沉河道)
   trees: [19, 20],            // 树
 };
+// 河道下沉深度:水面顶(-0.24+0.6=0.36)低于米黄顶(0.84),形成 ~0.5 深、带米黄墙的连续河道
+const RIVER_Y = -0.24;
 
 const SIDE_ROT = { E: 0, N: 1, W: 2, S: 3 };
 const CORNER_ROT = { NE: 0, NW: 1, SW: 2, SE: 3 };
@@ -57,15 +57,15 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   // 1) 米黄铺装打底
   for (let i = -R; i < R; i++) for (let j = -R; j < R; j++) put(i, j, T.base);
 
-  // 2) 运河:东西主河 + 南北支流 + 汇合池塘
-  const setRiver = (i, j, tile) => { put(i, j, tile.n, tile.rot, tile.y || 0); river.add(`${i},${j}`); };
-  const jr = -R + 5 + Math.floor(rng() * 4);
-  for (let i = -R; i < R; i++) setRiver(i, jr, T.riverEW);
-  const ib = -R + 9 + Math.floor(rng() * (R - 2));
-  for (let j = jr + 1; j < R; j++) setRiver(ib, j, T.riverNS);
-  setRiver(ib, jr, { n: T.pool, rot: 0 });
-  const pj = jr + 3 + Math.floor(rng() * 3);
-  for (let a = 0; a <= 1; a++) for (let b = 0; b <= 1; b++) setRiver(ib + a, pj + b, { n: T.pool, rot: 0 });
+  // 2) 河道:连续下沉水面(全用 176,各方向无缝相连);2 格宽主河 + 支流 + 水池
+  const setWater = (i, j) => { if (!inb(i, j)) return; put(i, j, T.water, 0, RIVER_Y); river.add(`${i},${j}`); };
+  const jr = -R + 5 + Math.floor(rng() * 4);      // 东西主河(2 格宽:jr, jr+1)
+  for (let i = -R; i < R; i++) { setWater(i, jr); setWater(i, jr + 1); }
+  const ib = -R + 9 + Math.floor(rng() * (R - 2)); // 南北支流(2 格宽:ib, ib+1)
+  for (let j = jr + 2; j < R; j++) { setWater(ib, j); setWater(ib + 1, j); }
+  // 汇合处扩成 4×4 水池(样张里那种开阔水面)
+  const pj = jr + 4 + Math.floor(rng() * 3);
+  for (let a = -1; a <= 2; a++) for (let b = 0; b <= 3; b++) setWater(ib + a, pj + b);
 
   // 3) 蜿蜒主干道(1~2 条),随机游走 + 拐弯;过河的格成桥
   let bridges = 0;

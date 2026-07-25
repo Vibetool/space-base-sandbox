@@ -6,8 +6,10 @@
 // layer: 'ground' | 'struct'(cell 类型的占用层)
 export const CELL = 4; // 基础网格 4 米(Space Kit 原生尺寸)
 
-const SK = (file) => `/models/${file}.glb`;
-const RD = (n) => `/models/roads/roadTile_${String(n).padStart(3, '0')}.gltf`;
+// 用 Vite BASE_URL 前缀,兼容子路径部署(如 GitHub Pages /space-base-sandbox/)
+const BASE = import.meta.env.BASE_URL;
+const SK = (file) => `${BASE}models/${file}.glb`;
+const RD = (n) => `${BASE}models/roads/roadTile_${String(n).padStart(3, '0')}.gltf`;
 
 export const CATEGORIES = [
   { id: 'floor', name: '地板' },
