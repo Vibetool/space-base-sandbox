@@ -23,15 +23,8 @@ export class Palette {
     dl.position.set(5, 9, 6);
     this.tScene.add(dl);
 
-    // 观察器:滚动进入视口才渲染缩略图(道路 302 块)
-    this.io = new IntersectionObserver((entries) => {
-      for (const en of entries) {
-        if (en.isIntersecting) {
-          this.io.unobserve(en.target);
-          this.queueThumb(en.target.dataset.kind, en.target);
-        }
-      }
-    }, { root: this.itemsEl, rootMargin: '120px' });
+    // 缩略图渲染很快(单张 ~3ms),整类一次性全渲染,避免滚动时出现空白卡片
+    this.renderToken = 0;
 
     for (const cat of CATEGORIES) {
       const b = document.createElement('div');
@@ -82,8 +75,8 @@ export class Palette {
         this.onSelect(this.selectedKind);
       };
       this.itemsEl.appendChild(el);
-      if (!cached) this.io.observe(el);
     }
+    this.renderAllThumbs();
   }
 
   markSelected(kind) {
@@ -91,26 +84,20 @@ export class Palette {
     for (const it of this.itemsEl.children) it.classList.toggle('selected', it.dataset.kind === kind);
   }
 
-  queueThumb(kind, el) {
-    this.thumbQueue.push({ kind, el });
-    this.pumpThumbs();
-  }
-
-  async pumpThumbs() {
-    if (this.thumbBusy) return;
-    this.thumbBusy = true;
-    while (this.thumbQueue.length) {
-      const { kind, el } = this.thumbQueue.shift();
-      if (!el.isConnected && this.thumbCache.has(kind)) continue;
+  // 当前分类的缩略图一次性全部渲染(单张 ~3ms,整类不到 1 秒),不再懒加载
+  async renderAllThumbs() {
+    const token = ++this.renderToken;
+    const pending = [...this.itemsEl.children].filter((el) => !el.querySelector('img'));
+    for (const el of pending) {
+      if (token !== this.renderToken) return; // 已切换分类,放弃这一批
+      const kind = el.dataset.kind;
       try {
         const url = await this.renderThumb(kind);
-        if (el.isConnected) {
-          const name = CATALOG[kind].name;
-          el.innerHTML = `<img src="${url}" alt=""><div class="name">${name}</div>`;
+        if (el.isConnected && token === this.renderToken) {
+          el.innerHTML = `<img src="${url}" alt=""><div class="name">${CATALOG[kind].name}</div>`;
         }
       } catch { /* 单个缩略图失败不影响整体 */ }
     }
-    this.thumbBusy = false;
   }
 
   async renderThumb(kind) {
