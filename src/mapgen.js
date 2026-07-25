@@ -7,7 +7,7 @@ const T = {
   base: 64,                   // 米黄铺装(打底)
   roadEW: { n: 104, rot: 0 }, // 深色沥青直路 东西
   roadNS: { n: 104, rot: 1 }, // 深色沥青直路 南北
-  curve: 110,                 // 90° 弯道(rot0=西南,rot1=南东,rot2=东北,rot3=北西)
+  curve: 112,                 // 整格宽圆角弯道(与 104 同宽;rot0=西南,rot1=南东,rot2=东北,rot3=北西)
   cross: { n: 58, rot: 0 },   // 实心路面(路口)
   grassFlat: 163,             // 平草地(铺在地面)
   plateau: 169,               // 抬升草地块 (0→1.65)
@@ -59,13 +59,13 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
 
   // 2) 河道:连续下沉水面(全用 176,各方向无缝相连);2 格宽主河 + 支流 + 水池
   const setWater = (i, j) => { if (!inb(i, j)) return; put(i, j, T.water, 0, RIVER_Y); river.add(`${i},${j}`); };
-  const jr = -R + 5 + Math.floor(rng() * 4);      // 东西主河(2 格宽:jr, jr+1)
-  for (let i = -R; i < R; i++) { setWater(i, jr); setWater(i, jr + 1); }
-  const ib = -R + 9 + Math.floor(rng() * (R - 2)); // 南北支流(2 格宽:ib, ib+1)
-  for (let j = jr + 2; j < R; j++) { setWater(ib, j); setWater(ib + 1, j); }
-  // 汇合处扩成 4×4 水池(样张里那种开阔水面)
+  const jr = -R + 5 + Math.floor(rng() * 4);      // 东西主河(1 格宽)
+  for (let i = -R; i < R; i++) setWater(i, jr);
+  const ib = -R + 9 + Math.floor(rng() * (R - 2)); // 南北支流(1 格宽)
+  for (let j = jr + 1; j < R; j++) setWater(ib, j);
+  // 汇合处扩成 3×3 水池
   const pj = jr + 4 + Math.floor(rng() * 3);
-  for (let a = -1; a <= 2; a++) for (let b = 0; b <= 3; b++) setWater(ib + a, pj + b);
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) setWater(ib + a, pj + b);
 
   // 3) 蜿蜒主干道(1~2 条),随机游走 + 拐弯;过河的格成桥
   let bridges = 0;
@@ -103,34 +103,51 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     return true;
   };
 
-  // 4) 抬升绿草丘(大比例,对标示范图):3~4 座,边长 6~9
+  // 4) 抬升绿草丘:多层梯田(对标示范图,每层升高 1.65,内缩成台阶)
+  const TIER = 1.65, STEP = 2; // 每层高度;每层向内缩 STEP 格
+  // 在矩形 [x0,x0+ww)×[z0,z0+dd) 边界铺朝外的草坡(y 为该层底高)
+  const ringSlopes = (x0, z0, ww, dd, y) => {
+    for (let i = x0; i < x0 + ww; i++) {
+      for (let j = z0; j < z0 + dd; j++) {
+        if (i > x0 && i < x0 + ww - 1 && j > z0 && j < z0 + dd - 1) continue; // 只铺边
+        const N = j === z0, S = j === z0 + dd - 1, W = i === x0, E = i === x0 + ww - 1;
+        grass.add(`${i},${j}`);
+        if (N && W) put(i, j, T.slopeCorner, CORNER_ROT.NW, y);
+        else if (N && E) put(i, j, T.slopeCorner, CORNER_ROT.NE, y);
+        else if (S && W) put(i, j, T.slopeCorner, CORNER_ROT.SW, y);
+        else if (S && E) put(i, j, T.slopeCorner, CORNER_ROT.SE, y);
+        else if (N) put(i, j, T.slope, SIDE_ROT.N, y);
+        else if (S) put(i, j, T.slope, SIDE_ROT.S, y);
+        else if (W) put(i, j, T.slope, SIDE_ROT.W, y);
+        else if (E) put(i, j, T.slope, SIDE_ROT.E, y);
+      }
+    }
+  };
   const plateaus = [];
-  const hillCount = 3 + Math.floor(rng() * 2);
+  const hillCount = 4 + Math.floor(rng() * 3);
   for (let h = 0; h < hillCount; h++) {
     const w = 6 + Math.floor(rng() * 4), d = 6 + Math.floor(rng() * 4);
     let ci, cj, tries = 0, ok = false;
-    while (tries++ < 100 && !ok) {
+    while (tries++ < 160 && !ok) {
       ci = Math.floor(rng() * (R * 2 - w)) - R;
       cj = Math.floor(rng() * (R * 2 - d)) - R;
       ok = freeRect(ci, cj, w, d);
     }
     if (!ok) continue;
-    plateaus.push({ ci, cj, w, d });
-    for (let i = ci; i < ci + w; i++) {
-      for (let j = cj; j < cj + d; j++) {
-        const N = j === cj, S = j === cj + d - 1, W = i === ci, E = i === ci + w - 1;
-        grass.add(`${i},${j}`);
-        if (N && W) put(i, j, T.slopeCorner, CORNER_ROT.NW);
-        else if (N && E) put(i, j, T.slopeCorner, CORNER_ROT.NE);
-        else if (S && W) put(i, j, T.slopeCorner, CORNER_ROT.SW);
-        else if (S && E) put(i, j, T.slopeCorner, CORNER_ROT.SE);
-        else if (N) put(i, j, T.slope, SIDE_ROT.N);
-        else if (S) put(i, j, T.slope, SIDE_ROT.S);
-        else if (W) put(i, j, T.slope, SIDE_ROT.W);
-        else if (E) put(i, j, T.slope, SIDE_ROT.E);
-        else put(i, j, T.plateau, 0);
-      }
+    const levels = 2 + (Math.min(w, d) >= 9 ? 1 : 0); // 大丘 3 层,否则 2 层
+    // 逐层:先把该层矩形内部整体铺成该层顶面的高台,再把边铺成朝外的坡;内层覆盖外层内部
+    for (let L = 0; L < levels; L++) {
+      const x0 = ci + L * STEP, z0 = cj + L * STEP;
+      const ww = w - 2 * L * STEP, dd = d - 2 * L * STEP;
+      if (ww < 2 || dd < 2) break;
+      const y = L * TIER;
+      for (let i = x0; i < x0 + ww; i++) for (let j = z0; j < z0 + dd; j++) { put(i, j, T.plateau, 0, y); grass.add(`${i},${j}`); }
+      ringSlopes(x0, z0, ww, dd, y);
     }
+    // 记录最内层平台范围(种树用)
+    const topL = Math.min(levels, Math.floor((Math.min(w, d) - 2) / (2 * STEP)) + 1) - 1;
+    const tw = w - 2 * topL * STEP, td = d - 2 * topL * STEP;
+    plateaus.push({ ci: ci + topL * STEP + 1, cj: cj + topL * STEP + 1, w: Math.max(0, tw - 2), d: Math.max(0, td - 2), full: { ci, cj, w, d } });
   }
 
   // 5) 平地绿地:3~5 片平草地铺在地面(不抬升),也种树
@@ -169,10 +186,13 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     const rec = await builder.placeDirect(id(rand(T.trees, rng)), i, j, Math.floor(rng() * 4), 'struct');
     if (rec) { builder._genUids.push(rec.uid); trees++; }
   };
-  for (const { ci, cj, w, d } of plateaus)
-    for (let i = ci + 1; i < ci + w - 1; i++)
-      for (let j = cj + 1; j < cj + d - 1; j++)
-        if (rng() < 0.72) await treeAt(i, j);
+  // 草丘:只在平台(flat)格上种树(斜坡上不种),各层都种
+  for (const p of plateaus) {
+    const f = p.full;
+    for (let i = f.ci; i < f.ci + f.w; i++)
+      for (let j = f.cj; j < f.cj + f.d; j++)
+        if (at(i, j)?.n === T.plateau && rng() < 0.6) await treeAt(i, j);
+  }
   for (const { ci, cj, w, d } of flats)
     for (let i = ci; i < ci + w; i++)
       for (let j = cj; j < cj + d; j++)
