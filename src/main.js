@@ -34,14 +34,14 @@ sun.shadow.camera.far = 260;
 sun.shadow.bias = -0.0004;
 scene.add(sun);
 
-// 地面 + 网格
+// 地面(米黄铺装色,略低于铺装底):作为下沉河道的渠底,河道格留空即露出它
 const GROUND_HALF = 100;
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(GROUND_HALF * 2, GROUND_HALF * 2),
-  new THREE.MeshStandardMaterial({ color: 0x23263a, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: 0xd8d1bd, roughness: 1 }),
 );
 ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.02;
+ground.position.y = -0.35;
 ground.receiveShadow = true;
 scene.add(ground);
 const grid = new THREE.GridHelper(GROUND_HALF * 2, (GROUND_HALF * 2) / CELL, 0x4a5080, 0x2e3350);
