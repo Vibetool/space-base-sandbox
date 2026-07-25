@@ -49,7 +49,10 @@
     background: var(--panel); border: 1px solid var(--panel-border);
     border-radius: 14px; backdrop-filter: blur(8px); z-index: 10;
     display: flex; flex-direction: column; box-shadow: 0 4px 24px #0008;
+    transition: width .15s;
   }
+  /* 道路分类:面板加宽,卡片更大更清楚 */
+  #palette.road-mode { width: 400px; }
   #tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 10px 10px 6px; }
   #tabs .tab {
     flex: none; font-size: 12px; padding: 5px 10px; border-radius: 7px;
@@ -67,10 +70,11 @@
     flex: 1; overflow-y: auto; padding: 8px 10px 12px;
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; align-content: start;
   }
-  /* 道路:单列大缩略图,每块完整清晰、彼此拉开 */
-  #items.wide { grid-template-columns: 1fr; gap: 20px; padding: 16px 16px 24px; }
-  #items.wide .item { border-radius: 14px; }
-  #items.wide .item .name { font-size: 13px; padding: 4px 6px; }
+  /* 道路:单列方形大卡,彼此充分拉开,每张都清晰 */
+  #items.wide { grid-template-columns: 1fr; gap: 34px; padding: 22px 22px 36px; }
+  #items.wide .item { border-radius: 16px; aspect-ratio: 1; background: #1a1e2e; }
+  #items.wide .item img { padding: 4px; }
+  #items.wide .item .name { font-size: 15px; padding: 6px 10px; }
   #items::-webkit-scrollbar { width: 8px; }
   #items::-webkit-scrollbar-thumb { background: #33385a; border-radius: 4px; }
   .item {

@@ -61,7 +61,8 @@ export class Palette {
     const isRoad = catId === 'road';
     this.subtabsEl.style.display = isRoad ? 'flex' : 'none';
     for (const t of this.subtabsEl.children) t.classList.toggle('active', t.dataset.sub === this.roadSub);
-    this.itemsEl.classList.toggle('wide', isRoad); // 道路:两列大缩略图
+    this.itemsEl.classList.toggle('wide', isRoad); // 道路:单列横向大卡
+    document.getElementById('palette').classList.toggle('road-mode', isRoad); // 道路:面板加宽
     this.itemsEl.innerHTML = '';
     for (const def of Object.values(CATALOG)) {
       if (def.cat !== catId) continue;
@@ -121,9 +122,10 @@ export class Palette {
     const box = new THREE.Box3().setFromObject(obj);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
-    // 统一用 3/4 斜视角(地板/墙/道路都清晰)
+    // 3/4 斜视角;道路瓦片(扁平)镜头拉近,填满卡片更清楚
     const r = Math.max(size.x, size.y, size.z) * 0.72 + 0.5;
-    this.tCam.position.set(center.x + r * 1.15, center.y + r * 1.05, center.z + r * 1.15);
+    const k = kind.startsWith('road-') ? 0.82 : 1.15;
+    this.tCam.position.set(center.x + r * k, center.y + r * (k - 0.1), center.z + r * k);
     this.tCam.lookAt(center);
     this.tCam.updateMatrixWorld(true);
     this.tr.render(this.tScene, this.tCam);
