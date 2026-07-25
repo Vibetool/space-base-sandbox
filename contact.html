@@ -43,7 +43,8 @@ for (const entry of list) {
     const c = box.getCenter(new THREE.Vector3());
     const s = box.getSize(new THREE.Vector3());
     const rad = Math.max(s.x, s.y, s.z) * 1.55 + 0.4;
-    cam.position.set(c.x, c.y + rad, c.z + 0.001); // 正上方俯视(+z 朝下=南,上=北 -z)
+    if (q.get('iso')) cam.position.set(c.x + rad, c.y + rad * 0.9, c.z + rad); // 3/4 斜视角
+    else cam.position.set(c.x, c.y + rad, c.z + 0.001); // 正上方俯视
     cam.lookAt(c);
     r.render(scene, cam);
     const div = document.createElement('div');

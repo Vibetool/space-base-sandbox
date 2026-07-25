@@ -1,14 +1,7 @@
 // 地图自动生成:对标 Kenney 样张
 //   米黄铺装打底 + 深色路网(过河成桥)+ 抬升绿草丘(大比例·密树)+ 平地绿地 + 运河/池塘
-import * as THREE from 'three';
 import { CELL } from './catalog.js';
 const id = (n) => `road-${String(n).padStart(3, '0')}`;
-
-// 河道水面材质(半透明浅蓝),整张地图共用
-const WATER_MAT = new THREE.MeshStandardMaterial({
-  color: 0x8fbcd4, transparent: true, opacity: 0.82, roughness: 0.3, metalness: 0.0,
-});
-const WATER_Y = -0.15; // 水面高度(低于铺装顶 0.84,形成下沉渠;高于地面板 -0.35 才可见)
 
 const T = {
   base: 64,                   // 米黄铺装(打底)
@@ -20,12 +13,14 @@ const T = {
   plateau: 169,               // 抬升草地块 (0→1.65)
   slope: 152,                 // 草地直坡
   slopeCorner: 151,           // 草地坡角
-  water: 176,                 // 开阔水面(各方向无缝相连,做连续下沉河道)
-  bankEdge: 274,              // 河岸块(带白色路缘,白边朝水)
-  trees: [19, 20],            // 树
+  channelEW: { n: 216, rot: 0 }, // 东西下沉渠(米黄墙+白色路缘+蓝水)
+  channelNS: { n: 216, rot: 1 }, // 南北下沉渠
+  pool: 207,                     // 下沉水池(四面墙,汇合/湖泊用)
+  lakeCorner: 272,               // 湖泊白框角
+  trees: [19, 20],               // 树
 };
-// 河道下沉深度:水面顶(-0.24+0.6=0.36)低于米黄顶(0.84),形成 ~0.5 深、带米黄墙的连续河道
-const RIVER_Y = -0.24;
+// 下沉深度:渠墙顶(2.2)沉到与米黄面齐平(0.84)→ y = 0.84 - 2.2
+const SINK = 0.84 - 2.2;
 
 const SIDE_ROT = { E: 0, N: 1, W: 2, S: 3 };
 const CORNER_ROT = { NE: 0, NW: 1, SW: 2, SE: 3 };
@@ -68,16 +63,15 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   // 1) 米黄铺装打底
   for (let i = -R; i < R; i++) for (let j = -R; j < R; j++) put(i, j, T.base);
 
-  // 2) 河道:下沉水渠。河道格留空(删掉米黄)→ 露出米黄地面板当渠底、周围米黄格侧壁当渠墙;
-  //    另加半透明蓝色水面 mesh。1 格宽主河 + 支流 + 水池
-  const setWater = (i, j) => { if (!inb(i, j)) return; cells.delete(`${i},${j}`); river.add(`${i},${j}`); };
+  // 2) 河道:自带米黄墙+白色路缘+蓝水的下沉渠瓦片,放到负 y 直接陷进地里
+  const setWater = (i, j, tile) => { if (!inb(i, j)) return; put(i, j, tile.n, tile.rot, SINK); river.add(`${i},${j}`); };
   const jr = -R + 5 + Math.floor(rng() * 4);      // 东西主河
-  for (let i = -R; i < R; i++) setWater(i, jr);
+  for (let i = -R; i < R; i++) setWater(i, jr, T.channelEW);
   const ib = -R + 9 + Math.floor(rng() * (R - 2)); // 南北支流
-  for (let j = jr + 1; j < R; j++) setWater(ib, j);
-  // 汇合处扩成 3×3 水池
+  for (let j = jr + 1; j < R; j++) setWater(ib, j, T.channelNS);
+  // 汇合处 + 湖泊:3×3 下沉水池(207 basin)
   const pj = jr + 4 + Math.floor(rng() * 3);
-  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) setWater(ib + a, pj + b);
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) setWater(ib + a, pj + b, { n: T.pool, rot: 0 });
 
   // 3) 蜿蜒主干道(1~2 条),随机游走 + 拐弯;过河的格成桥
   let bridges = 0;
@@ -124,7 +118,9 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   const plateaus = [];
   const hillCount = 4 + Math.floor(rng() * 3);
   for (let h = 0; h < hillCount; h++) {
-    const bw = 5 + Math.floor(rng() * 4), bd = 5 + Math.floor(rng() * 4);
+    const big = h < 2; // 前 2 座做大山(可达 3 层)
+    const bw = (big ? 10 : 5) + Math.floor(rng() * (big ? 3 : 4));
+    const bd = (big ? 10 : 5) + Math.floor(rng() * (big ? 3 : 4));
     let bi, bj, tries = 0, ok = false;
     while (tries++ < 160 && !ok) {
       bi = Math.floor(rng() * (R * 2 - bw)) - R;
@@ -191,16 +187,6 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     for (let i = ci; i < ci + w; i++) for (let j = cj; j < cj + d; j++) { put(i, j, T.grassFlat); grass.add(`${i},${j}`); }
   }
 
-  // 5.5) 河岸白边:河道相邻的米黄格换成带白色路缘的岸块(白边朝水)
-  for (const key of river) {
-    const [i, j] = key.split(',').map(Number);
-    for (const [di, dj, rot] of [[0, -1, 0], [0, 1, 0], [1, 0, 1], [-1, 0, 1]]) {
-      const nk = `${i + di},${j + dj}`;
-      if (river.has(nk) || !inb(i + di, j + dj)) continue;
-      if (cells.get(nk)?.n === T.base) put(i + di, j + dj, T.bankEdge, rot);
-    }
-  }
-
   // 6) 放置:先铺底(米黄/运河/草),再把道路叠在其上(struct 层)
   let placed = 0, skipped = 0;
   for (const [key, { n, rot, y }] of cells) {
@@ -213,24 +199,6 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     // 独立 'road' 层,路面顶(0.06+0.80=0.86)略高于铺装顶(0.84),可见且近乎齐平
     const rec = await builder.placeDirect(id(tile.n), i, j, tile.rot, 'road', 0.06);
     if (rec) { builder._genUids.push(rec.uid); placed++; }
-  }
-
-  // 6.5) 河道水面:为每个河道格生成一片蓝色四边形(合并成一个 mesh)
-  if (river.size) {
-    const pos = [];
-    for (const key of river) {
-      const [i, j] = key.split(',').map(Number);
-      const x0 = i * CELL, x1 = (i + 1) * CELL, z0 = j * CELL, z1 = (j + 1) * CELL;
-      // 绕序使正面朝上(+y),受上方光照正常
-      pos.push(x0, WATER_Y, z0, x1, WATER_Y, z1, x1, WATER_Y, z0,  x0, WATER_Y, z0, x0, WATER_Y, z1, x1, WATER_Y, z1);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geo.setAttribute('normal', new THREE.Float32BufferAttribute(pos.map((_, k) => (k % 3 === 1 ? 1 : 0)), 3));
-    const water = new THREE.Mesh(geo, WATER_MAT);
-    water.receiveShadow = true;
-    builder.world.add(water);
-    builder._genMeshes.push(water);
   }
 
   // 7) 树:草丘顶密植 + 平草地零散

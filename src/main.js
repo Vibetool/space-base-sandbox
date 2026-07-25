@@ -41,9 +41,10 @@ const ground = new THREE.Mesh(
   new THREE.MeshStandardMaterial({ color: 0xd8d1bd, roughness: 1 }),
 );
 ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.35;
+ground.position.y = -1.55; // 降到下沉水面以下,避免遮挡沉渠的水
 ground.receiveShadow = true;
 scene.add(ground);
+window.__ground = ground;
 const grid = new THREE.GridHelper(GROUND_HALF * 2, (GROUND_HALF * 2) / CELL, 0x4a5080, 0x2e3350);
 grid.position.y = 0.01;
 grid.material.transparent = true;
