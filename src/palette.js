@@ -15,7 +15,7 @@ export class Palette {
 
     // 离屏缩略图渲染器
     this.tr = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-    this.tr.setSize(120, 120);
+    this.tr.setSize(192, 192); // 卡片 174px,120px 会糊
     this.tScene = new THREE.Scene();
     this.tCam = new THREE.PerspectiveCamera(38, 1, 0.1, 500);
     this.tScene.add(new THREE.HemisphereLight(0xffffff, 0x556, 1.15));
@@ -111,7 +111,7 @@ export class Palette {
     const center = box.getCenter(new THREE.Vector3());
     // 3/4 斜视角;道路瓦片(扁平)镜头拉近,填满卡片更清楚
     const r = Math.max(size.x, size.y, size.z) * 0.72 + 0.5;
-    const k = kind.startsWith('road-') ? 0.82 : 1.15;
+    const k = kind.startsWith('road-') ? 1.05 : 1.15;
     this.tCam.position.set(center.x + r * k, center.y + r * (k - 0.1), center.z + r * k);
     this.tCam.lookAt(center);
     this.tCam.updateMatrixWorld(true);

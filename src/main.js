@@ -19,36 +19,42 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.domElement.classList.add('game');
 app.appendChild(renderer.domElement);
 
+// 明亮暖灰棚拍氛围(对标 Kenney 样张;深色夜景会让所有瓦片发暗发紫)
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x12141c);
-scene.fog = new THREE.Fog(0x12141c, 160, 320);
+scene.background = new THREE.Color(0xe9e6dd);
+scene.fog = null;
 
-scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x3a3450, 0.9));
-const sun = new THREE.DirectionalLight(0xffeedd, 1.7);
-sun.position.set(50, 80, 30);
+scene.add(new THREE.HemisphereLight(0xffffff, 0xcfcabb, 1.15));
+const sun = new THREE.DirectionalLight(0xfff6e8, 1.05);
+sun.position.set(48, 92, 62);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.left = -110; sun.shadow.camera.right = 110;
 sun.shadow.camera.top = 110; sun.shadow.camera.bottom = -110;
 sun.shadow.camera.far = 260;
 sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.02;
 scene.add(sun);
+const fill = new THREE.DirectionalLight(0xdfe8ff, 0.22); // 无阴影补光,压暗部
+fill.position.set(-60, 40, -50);
+scene.add(fill);
 
-// 地面(米黄铺装色,略低于铺装底):作为下沉河道的渠底,河道格留空即露出它
+// 地面(Kenney Stone 精确色 216,211,191)
 const GROUND_HALF = 100;
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(GROUND_HALF * 2, GROUND_HALF * 2),
-  new THREE.MeshStandardMaterial({ color: 0xd8d1bd, roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: 0xd8d3bf, roughness: 1 }),
 );
 ground.rotation.x = -Math.PI / 2;
-ground.position.y = -1.55; // 降到下沉水面以下,避免遮挡沉渠的水
+ground.position.y = -0.02;
 ground.receiveShadow = true;
 scene.add(ground);
-window.__ground = ground;
-const grid = new THREE.GridHelper(GROUND_HALF * 2, (GROUND_HALF * 2) / CELL, 0x4a5080, 0x2e3350);
-grid.position.y = 0.01;
+// 网格线抬到铺装面之上,才有样张那种"带细网格的铺装广场";否则被瓦片整块埋住
+const grid = new THREE.GridHelper(GROUND_HALF * 2, (GROUND_HALF * 2) / CELL, 0xb9b2a0, 0xcbc4b2);
+grid.position.y = 0.845;
 grid.material.transparent = true;
-grid.material.opacity = 0.55;
+grid.material.opacity = 0.35;
+grid.material.depthWrite = false;
 scene.add(grid);
 
 const cam = new GodCamera(renderer.domElement);
