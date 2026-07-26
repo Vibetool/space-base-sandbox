@@ -24,8 +24,9 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe9e6dd);
 scene.fog = null;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0xcfcabb, 1.15));
-const sun = new THREE.DirectionalLight(0xfff6e8, 1.05);
+// 环境光调高:渠壁内侧面等竖直面在掠射角下不会暗成深蓝(会被误看成水面在下斜)
+scene.add(new THREE.HemisphereLight(0xffffff, 0xdedad0, 1.55));
+const sun = new THREE.DirectionalLight(0xfff6e8, 0.8);
 sun.position.set(48, 92, 62);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -35,8 +36,9 @@ sun.shadow.camera.far = 260;
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.02;
 scene.add(sun);
-const fill = new THREE.DirectionalLight(0xdfe8ff, 0.22); // 无阴影补光,压暗部
-fill.position.set(-60, 40, -50);
+// 补光改中性白(原先偏蓝会把阴影染成 navy),并加强以提亮渠壁背光面
+const fill = new THREE.DirectionalLight(0xffffff, 0.5);
+fill.position.set(-60, 45, -55);
 scene.add(fill);
 
 // 地面(Kenney Stone 精确色 216,211,191)
