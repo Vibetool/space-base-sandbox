@@ -10,10 +10,12 @@ const S = CELL / 3;          // 道路瓦片缩放 4/3
 export const Y_PAVE = 0.63 * S;  // 0.84      米黄地表基准(全图地面高度)
 const Y_GRASS = 0.55 * S;    // 0.7333    草地面(比米黄低 0.107,天然路缘)
 const TIER_STEP = 1.10 * S;  // 1.4667    坡道瓦片跨越的高差(0.55→1.65),坡度锁死约 20°
-const MAXTIER = 6;           // 山体最高层数
+const MAXTIER = 5;           // 山体最高层数
 // 山体用竖直崖壁堆叠:坡道瓦片只能做 20° 缓坡,靠堆草块才能做出又高又尖的山
 const BLOCK_H = 1.65 * S;    // 2.20   草块(36)的世界高度
 const RISE = 2;              // 每内缩 1 格升 2 块 → 约 48°,远陡于坡道的 20°
+const MOUNT_COUNT = 3;       // 山的座数
+const MOUNT_MIN = 8, MOUNT_MAX = 11; // 基座尺寸(小一些,和地图比例协调)
 
 const T = {
   pave: 2,        // 纯米黄铺装(64 含白线会 z-fighting,勿用)
@@ -64,6 +66,23 @@ function mulberry32(seed) {
 const rand = (arr, rng) => arr[Math.floor(rng() * arr.length)];
 const ri = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1)); // 闭区间
 
+// 平滑值噪声:山体起伏必须空间连贯,逐格独立随机会把山削成迷宫
+const makeNoise = (seed) => {
+  const h2 = (i, j) => {
+    let h = (Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(seed, 1442695041)) | 0;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const fade = (t) => t * t * (3 - 2 * t);
+  return (i, j, scale) => {
+    const x = i / scale, z = j / scale;
+    const x0 = Math.floor(x), z0 = Math.floor(z);
+    const fx = fade(x - x0), fz = fade(z - z0);
+    const a = h2(x0, z0), b = h2(x0 + 1, z0), c = h2(x0, z0 + 1), d = h2(x0 + 1, z0 + 1);
+    return (a + (b - a) * fx) * (1 - fz) + (c + (d - c) * fx) * fz;
+  };
+};
+
 // 四邻连通掩码 → 瓦片与旋转(道路和水渠共用这套拓扑逻辑)
 function tileFromMask(dirs, kit) {
   const has = (d) => dirs.includes(d);
@@ -96,7 +115,8 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   builder._genMeshes = [];
 
   const rng = mulberry32(seed);
-  const R = 18;                                   // 36×36 格 = 144m(留出大山基座的空间)
+  const noise = makeNoise(seed);
+  const R = 18;                                 // 36×36 格 = 144m(留出大山基座的空间)
   const cells = new Map();                        // "i,j" → {n, rot, y};一格一件
   const put = (i, j, n, rot = 0, y = 0) => cells.set(`${i},${j}`, { n, rot, y });
   const at = (i, j) => cells.get(`${i},${j}`);
@@ -203,14 +223,12 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   const canalRows = countBy((c) => c.j);
   const canalCols = countBy((c) => c.i);
 
-  // 2.5) 预留大山基座:必须在选路之前定,否则路会把街区切碎、山堆不高
-  //      (要到 MAXTIER 层,基座最短边需 ≥ 2·MAXTIER)
+  // 2.5) 预留山体基座:必须在选路之前定,否则路会把街区切碎、山堆不高
   const mounts = [];
   {
-    const need = 2 * MAXTIER;                       // 12
-    for (let m = 0; m < 2; m++) {
-      const mw = ri(rng, need, need + 3), mh = ri(rng, need, need + 3);
-      for (let t = 0; t < 120; t++) {
+    for (let m = 0; m < MOUNT_COUNT; m++) {
+      const mw = ri(rng, MOUNT_MIN, MOUNT_MAX), mh = ri(rng, MOUNT_MIN, MOUNT_MAX);
+      for (let t = 0; t < 200; t++) {
         const mi = ri(rng, -R + 2, R - 2 - mw), mj = ri(rng, -R + 2, R - 2 - mh);
         let ok = true;
         for (let i = mi - 1; i <= mi + mw && ok; i++)
@@ -346,37 +364,65 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   };
 
   const plateaus = [], lawns = [], mountStacks = [];
-  // 4a) 山丘:在预留的基座上做嵌套矩形金字塔(每层内缩 1 格 → 陡峭尖锐,最高 MAXTIER 层)
-  //     用矩形而非腐蚀轮廓,几何上保证每格都能找到对应坡道瓦片,不会出现无解的尖峰/山脊
+  // 4a) 山丘:不规则轮廓 + 腐蚀分层 + 竖直崖壁堆叠
+  //     草块是纯立方体,任何形状都能堆(不像坡道瓦片有"无解格"限制),所以轮廓可以自由不规则
   for (const m of mounts) {
-    // 基座若被路/水侵占则跳过该格;整体仍按矩形算层级
-    const rect = { i: m.i, j: m.j, w: m.w, h: m.h };
-    // 基座外围一圈铺平草地当围裙,让坡脚落在草面而不是埋进铺装
-    for (let i = rect.i - 1; i <= rect.i + rect.w; i++) for (let j = rect.j - 1; j <= rect.j + rect.h; j++) {
-      if (i >= rect.i && i < rect.i + rect.w && j >= rect.j && j < rect.j + rect.h) continue;
-      const k = `${i},${j}`;
-      if (!inb(i, j) || water.has(k) || road.has(k) || green.has(k)) continue;
-      put(i, j, T.grass, 0, 0); green.add(k);
+    // 不规则轮廓:基座内取 3~4 个互相交叠的子矩形取并集,得到有机形状
+    const blob = new Set();
+    const nSub = ri(rng, 3, 4);
+    for (let s = 0; s < nSub; s++) {
+      const sw = ri(rng, Math.ceil(m.w * 0.55), m.w), sh = ri(rng, Math.ceil(m.h * 0.55), m.h);
+      const si = m.i + ri(rng, 0, m.w - sw), sj = m.j + ri(rng, 0, m.h - sh);
+      for (let i = si; i < si + sw; i++) for (let j = sj; j < sj + sh; j++) {
+        const k = `${i},${j}`;
+        if (inb(i, j) && !water.has(k) && !road.has(k)) blob.add(k);
+      }
+    }
+    if (blob.size < 16) continue;
+
+    // 山脚外一圈铺平草地,让崖壁落在草面而不是直接怼在铺装上
+    for (const k of blob) {
+      const [i, j] = k.split(',').map(Number);
+      for (const [di, dj] of Object.values(DIRS)) {
+        const nk = `${i + di},${j + dj}`;
+        if (blob.has(nk) || !inb(i + di, j + dj)) continue;
+        if (water.has(nk) || road.has(nk) || green.has(nk)) continue;
+        put(i + di, j + dj, T.grass, 0, 0); green.add(nk);
+      }
     }
 
-    // 层数上限:保证顶部平台在两个方向都 ≥2 格(1 格宽的山脊没有对应瓦片)
-    const maxT = Math.min(MAXTIER, Math.floor(Math.min(rect.w, rect.h) / 2));
-    const tierAt = (i, j) => {
-      if (i < rect.i || i >= rect.i + rect.w || j < rect.j || j >= rect.j + rect.h) return 0;
-      const d = Math.min(i - rect.i, rect.i + rect.w - 1 - i, j - rect.j, rect.j + rect.h - 1 - j);
-      return 1 + Math.min(d, maxT - 1);
-    };
-    // 每格填一列草块:从"最低邻格的顶"填到自己的顶,形成竖直崖壁(下方被邻格挡住,不用填到地面)
+    // 腐蚀分层:tier = 该格能撑过几轮腐蚀 → 轮廓天然跟随不规则外形
+    const tier = new Map();
+    let cur = blob, level = 1;
+    while (cur.size && level <= MAXTIER) {
+      for (const k of cur) tier.set(k, level);
+      cur = erode(cur);
+      level++;
+    }
+    // 用平滑噪声成片削低 → 打破规整同心环,做出山脊与凹谷(逐格独立随机会变成迷宫)
+    for (const k of blob) {
+      const [i, j] = k.split(',').map(Number);
+      const t = tier.get(k) || 1;
+      if (t <= 1) continue;
+      const n = noise(i, j, 4);
+      if (n < 0.34) tier.set(k, Math.max(1, t - 2));
+      else if (n < 0.48) tier.set(k, t - 1);
+    }
+    const tierAt = (i, j) => tier.get(`${i},${j}`) || 0;
+    const topOf = (i, j) => (tierAt(i, j) - 1) * RISE * BLOCK_H + BLOCK_H;
+
+    // 每格填一列草块:从"最低邻格的顶"填到自己的顶(下方被邻格挡住,不必填到地面)
     const cells = [], stacks = [];
-    for (let i = rect.i; i < rect.i + rect.w; i++) for (let j = rect.j; j < rect.j + rect.h; j++) {
-      const k = `${i},${j}`;
+    for (const k of blob) {
+      const [i, j] = k.split(',').map(Number);
       const t = tierAt(i, j);
-      const topY = (t - 1) * RISE * BLOCK_H;               // 该格最上面一块的底面 y
-      const fromY = Math.max(0, (t - 2) * RISE * BLOCK_H); // 邻层顶,再往下会被挡住
+      const minNbr = Math.min(...Object.values(DIRS).map(([di, dj]) => tierAt(i + di, j + dj)));
+      const topY = (t - 1) * RISE * BLOCK_H;                  // 最上面一块的底面
+      const fromY = Math.max(0, (minNbr - 1) * RISE * BLOCK_H); // 按最低邻格算,任意层差都不会露空
       for (let y = fromY; y <= topY + 1e-6; y += BLOCK_H) stacks.push({ i, j, y });
       green.add(k); cells.push(k);
     }
-    plateaus.push({ cells, rect, maxT, topOf: (i, j) => (tierAt(i, j) - 1) * RISE * BLOCK_H + BLOCK_H });
+    plateaus.push({ cells, topOf });
     mountStacks.push(...stacks);
   }
 
