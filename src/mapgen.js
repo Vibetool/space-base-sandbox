@@ -9,7 +9,11 @@ const id = (n) => `road-${String(n).padStart(3, '0')}`;
 const S = CELL / 3;          // 道路瓦片缩放 4/3
 export const Y_PAVE = 0.63 * S;  // 0.84      米黄地表基准(全图地面高度)
 const Y_GRASS = 0.55 * S;    // 0.7333    草地面(比米黄低 0.107,天然路缘)
-const TIER_STEP = 1.10 * S;  // 1.4667    梯田层高 = 坡道跨越的高差(0.55→1.65),不是块高
+const TIER_STEP = 1.10 * S;  // 1.4667    坡道瓦片跨越的高差(0.55→1.65),坡度锁死约 20°
+const MAXTIER = 6;           // 山体最高层数
+// 山体用竖直崖壁堆叠:坡道瓦片只能做 20° 缓坡,靠堆草块才能做出又高又尖的山
+const BLOCK_H = 1.65 * S;    // 2.20   草块(36)的世界高度
+const RISE = 2;              // 每内缩 1 格升 2 块 → 约 48°,远陡于坡道的 20°
 
 const T = {
   pave: 2,        // 纯米黄铺装(64 含白线会 z-fighting,勿用)
@@ -92,7 +96,7 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   builder._genMeshes = [];
 
   const rng = mulberry32(seed);
-  const R = 15;                                   // 30×30 格 = 120m
+  const R = 18;                                   // 36×36 格 = 144m(留出大山基座的空间)
   const cells = new Map();                        // "i,j" → {n, rot, y};一格一件
   const put = (i, j, n, rot = 0, y = 0) => cells.set(`${i},${j}`, { n, rot, y });
   const at = (i, j) => cells.get(`${i},${j}`);
@@ -198,6 +202,35 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   };
   const canalRows = countBy((c) => c.j);
   const canalCols = countBy((c) => c.i);
+
+  // 2.5) 预留大山基座:必须在选路之前定,否则路会把街区切碎、山堆不高
+  //      (要到 MAXTIER 层,基座最短边需 ≥ 2·MAXTIER)
+  const mounts = [];
+  {
+    const need = 2 * MAXTIER;                       // 12
+    for (let m = 0; m < 2; m++) {
+      const mw = ri(rng, need, need + 3), mh = ri(rng, need, need + 3);
+      for (let t = 0; t < 120; t++) {
+        const mi = ri(rng, -R + 2, R - 2 - mw), mj = ri(rng, -R + 2, R - 2 - mh);
+        let ok = true;
+        for (let i = mi - 1; i <= mi + mw && ok; i++)
+          for (let j = mj - 1; j <= mj + mh && ok; j++) if (water.has(`${i},${j}`)) ok = false;
+        for (const o of mounts) {
+          if (!ok) break;
+          if (!(mi + mw < o.i - 2 || mi > o.i + o.w + 1 || mj + mh < o.j - 2 || mj > o.j + o.h + 1)) ok = false;
+        }
+        if (ok) { mounts.push({ i: mi, j: mj, w: mw, h: mh }); break; }
+      }
+    }
+  }
+  // 路不得穿过山体基座
+  const mountRows = new Set(), mountCols = new Set();
+  for (const m of mounts) {
+    for (let j = m.j - 1; j <= m.j + m.h; j++) mountRows.add(j);
+    for (let i = m.i - 1; i <= m.i + m.w; i++) mountCols.add(i);
+  }
+  const union = (a, b) => new Set([...a, ...b]);
+
   const pickSpaced = (lo, hi, n, gap, blocked) => {
     const out = [];
     for (let t = 0; t < 80 && out.length < n; t++) {
@@ -207,8 +240,8 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     }
     return out;
   };
-  const rows = pickSpaced(-R + 3, R - 4, ri(rng, 2, 3), 8, canalRows);
-  const cols = pickSpaced(-R + 3, R - 4, ri(rng, 2, 3), 8, canalCols);
+  const rows = pickSpaced(-R + 3, R - 4, ri(rng, 2, 3), 8, union(canalRows, mountRows));
+  const cols = pickSpaced(-R + 3, R - 4, ri(rng, 2, 3), 8, union(canalCols, mountCols));
   const roadSet = new Set();
   for (const j of rows) for (let i = -R; i < R; i++) roadSet.add(`${i},${j}`);
   for (const i of cols) for (let j = -R; j < R; j++) roadSet.add(`${i},${j}`);
@@ -285,70 +318,66 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     }
     return out;
   };
-  const dilate = (set, within) => {
-    const out = new Set(set);
-    for (const k of set) {
-      const [i, j] = k.split(',').map(Number);
-      for (const [di, dj] of Object.values(DIRS)) {
-        const nk = `${i + di},${j + dj}`;
-        if (within.has(nk)) out.add(nk);
+
+  // 在给定格集合里找最大内接轴对齐矩形(直方图法)
+  const maxRect = (set) => {
+    const list = [...set].map((k) => k.split(',').map(Number));
+    if (!list.length) return null;
+    const i0 = Math.min(...list.map((p) => p[0])), i1 = Math.max(...list.map((p) => p[0]));
+    const j0 = Math.min(...list.map((p) => p[1])), j1 = Math.max(...list.map((p) => p[1]));
+    const W = i1 - i0 + 1, H = j1 - j0 + 1;
+    const heights = new Array(W).fill(0);
+    let best = null;
+    for (let r = 0; r < H; r++) {
+      for (let c = 0; c < W; c++) heights[c] = set.has(`${i0 + c},${j0 + r}`) ? heights[c] + 1 : 0;
+      const st = [];
+      for (let c = 0; c <= W; c++) {
+        const h = c === W ? 0 : heights[c];
+        while (st.length && heights[st[st.length - 1]] >= h) {
+          const top = st.pop();
+          const left = st.length ? st[st.length - 1] + 1 : 0;
+          const w = c - left, hh = heights[top];
+          if (!best || w * hh > best.w * best.h) best = { i: i0 + left, j: j0 + r - hh + 1, w, h: hh };
+        }
+        st.push(c);
       }
     }
-    return out;
+    return best;
   };
 
-  const plateaus = [], lawns = [];
-  // 4a) 大草丘(多层梯田):最大的 1~2 个街区
-  for (const comp of blocks.filter((c) => c.length >= 40).slice(0, 2)) {
-    const full = new Set(comp.map(([i, j]) => `${i},${j}`));
-    const inner = erode(full);                      // 内缩 1 格,留出米黄人行带
-    if (inner.size < 12) continue;
-    const S1 = dilate(erode(inner), inner);         // 开运算:消除 1 格尖刺/细颈,否则坡道对不上
-    if (S1.size < 12) continue;
-    const apron = new Set([...S1].filter((k) => {   // 最外一圈铺平草地当围裙,让坡脚落在草面
-      const [i, j] = k.split(',').map(Number);
-      return !Object.values(DIRS).every(([di, dj]) => S1.has(`${i + di},${j + dj}`));
-    }));
-    for (const k of apron) { const [i, j] = k.split(',').map(Number); put(i, j, T.grass, 0, 0); green.add(k); }
-    const core = new Set([...S1].filter((k) => !apron.has(k)));
-    if (!core.size) continue;
+  const plateaus = [], lawns = [], mountStacks = [];
+  // 4a) 山丘:在预留的基座上做嵌套矩形金字塔(每层内缩 1 格 → 陡峭尖锐,最高 MAXTIER 层)
+  //     用矩形而非腐蚀轮廓,几何上保证每格都能找到对应坡道瓦片,不会出现无解的尖峰/山脊
+  for (const m of mounts) {
+    // 基座若被路/水侵占则跳过该格;整体仍按矩形算层级
+    const rect = { i: m.i, j: m.j, w: m.w, h: m.h };
+    // 基座外围一圈铺平草地当围裙,让坡脚落在草面而不是埋进铺装
+    for (let i = rect.i - 1; i <= rect.i + rect.w; i++) for (let j = rect.j - 1; j <= rect.j + rect.h; j++) {
+      if (i >= rect.i && i < rect.i + rect.w && j >= rect.j && j < rect.j + rect.h) continue;
+      const k = `${i},${j}`;
+      if (!inb(i, j) || water.has(k) || road.has(k) || green.has(k)) continue;
+      put(i, j, T.grass, 0, 0); green.add(k);
+    }
 
-    // 逐层腐蚀求 tier(每 3 圈升一层:2 格平台 + 1 格坡)
-    const tier = new Map();
-    let cur = core, level = 1;
-    while (cur.size && level <= 3) {
-      for (const k of cur) tier.set(k, level);
-      cur = erode(erode(erode(cur)));
-      level++;
+    // 层数上限:保证顶部平台在两个方向都 ≥2 格(1 格宽的山脊没有对应瓦片)
+    const maxT = Math.min(MAXTIER, Math.floor(Math.min(rect.w, rect.h) / 2));
+    const tierAt = (i, j) => {
+      if (i < rect.i || i >= rect.i + rect.w || j < rect.j || j >= rect.j + rect.h) return 0;
+      const d = Math.min(i - rect.i, rect.i + rect.w - 1 - i, j - rect.j, rect.j + rect.h - 1 - j);
+      return 1 + Math.min(d, maxT - 1);
+    };
+    // 每格填一列草块:从"最低邻格的顶"填到自己的顶,形成竖直崖壁(下方被邻格挡住,不用填到地面)
+    const cells = [], stacks = [];
+    for (let i = rect.i; i < rect.i + rect.w; i++) for (let j = rect.j; j < rect.j + rect.h; j++) {
+      const k = `${i},${j}`;
+      const t = tierAt(i, j);
+      const topY = (t - 1) * RISE * BLOCK_H;               // 该格最上面一块的底面 y
+      const fromY = Math.max(0, (t - 2) * RISE * BLOCK_H); // 邻层顶,再往下会被挡住
+      for (let y = fromY; y <= topY + 1e-6; y += BLOCK_H) stacks.push({ i, j, y });
+      green.add(k); cells.push(k);
     }
-    for (const k of core) {
-      const [i, j] = k.split(',').map(Number);
-      const t = tier.get(k) || 1;
-      const y = (t - 1) * TIER_STEP;
-      const low = Object.entries(DIRS)
-        .filter(([, [di, dj]]) => (tier.get(`${i + di},${j + dj}`) || 0) < t)
-        .map(([d]) => d);
-      let tile;
-      if (low.length === 0) {
-        // 检查对角是否更低 → 内凹角
-        const diag = [['N', 'E', 'NE'], ['N', 'W', 'NW'], ['S', 'E', 'SE'], ['S', 'W', 'SW']]
-          .find(([a, b, name]) => {
-            const [ai, aj] = DIRS[a], [bi, bj] = DIRS[b];
-            return (tier.get(`${i + ai + bi},${j + aj + bj}`) || 0) < t;
-          });
-        tile = diag ? { n: T.slopeInner, rot: CURVE_ROT[diag[2]] } : { n: T.plateau, rot: 0 };
-      } else if (low.length === 1) {
-        tile = { n: T.slope, rot: SLOPE_ROT[low[0]] };
-      } else if (low.length === 2 && !((low.includes('N') && low.includes('S')) || (low.includes('E') && low.includes('W')))) {
-        const corner = (low.includes('N') ? 'N' : 'S') + (low.includes('E') ? 'E' : 'W');
-        tile = { n: T.slopeOuter, rot: CURVE_ROT[corner] };
-      } else {
-        tile = { n: T.grass, rot: 0 }; // 对向/尖角无对应瓦片 → 退回平草地
-      }
-      put(i, j, tile.n, tile.rot, tile.n === T.grass ? 0 : y);
-      green.add(k);
-    }
-    plateaus.push({ cells: [...core], tier });
+    plateaus.push({ cells, rect, maxT, topOf: (i, j) => (tierAt(i, j) - 1) * RISE * BLOCK_H + BLOCK_H });
+    mountStacks.push(...stacks);
   }
 
   // 4b) 平草坪:中等街区 1~2 个
@@ -376,6 +405,14 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     if (++n % 150 === 0) await new Promise((r) => setTimeout(r, 0)); // 让出主线程(rAF 在标签页隐藏时不触发)
   }
 
+  // 5.5) 山体草块堆叠(每块用独立图层名,绕开"每格每层只能一件"的限制)
+  for (const s of mountStacks) {
+    const layer = `hill${Math.round(s.y / BLOCK_H)}`;
+    const rec = await builder.placeDirect(id(T.plateau), s.i, s.j, 0, layer, s.y);
+    if (rec) { builder._genUids.push(rec.uid); placed++; } else skipped++;
+    if (++n % 150 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+
   // ── 6) 树:成簇 + 行道树 ──────────────────────
   let trees = 0;
   const adjRoad = (i, j) => Object.values(DIRS).some(([di, dj]) => road.has(`${i + di},${j + dj}`));
@@ -387,14 +424,32 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     clusters.push({ i, j, r: ri(rng, 2, 3) });
   }
   const inCluster = (i, j) => clusters.some((c) => Math.abs(c.i - i) + Math.abs(c.j - j) <= c.r);
-  for (const k of green) {
+  // 山体各层平台的顶面高度(山块走自定义图层,builder.groundTop 看不见,必须显式传 y)
+  const mountTop = new Map();
+  for (const p of plateaus) for (const k of p.cells) {
     const [i, j] = k.split(',').map(Number);
-    const cell = at(i, j);
-    // 只在平面上种树(平台/平草地),斜坡上不种
-    if (!cell || ![T.plateau, T.grass, T.grassCorner].includes(cell.n)) continue;
-    const p = inCluster(i, j) ? 0.55 : adjRoad(i, j) ? 0.32 : 0.07;
+    mountTop.set(k, p.topOf(i, j));
+  }
+  const treeCells = new Set([...green, ...mountTop.keys()]);
+  for (const k of treeCells) {
+    const [i, j] = k.split(',').map(Number);
+    const onMount = mountTop.has(k);
+    if (!onMount) {
+      const cell = at(i, j);
+      if (!cell || ![T.plateau, T.grass, T.grassCorner].includes(cell.n)) continue;
+    } else {
+      // 山上只种在"台面"格(四邻同高),崖边不种
+      const y = mountTop.get(k);
+      const flat = Object.values(DIRS).every(([di, dj]) => {
+        const nk = `${i + di},${j + dj}`;
+        return !mountTop.has(nk) || Math.abs(mountTop.get(nk) - y) < 1e-6;
+      });
+      if (!flat) continue;
+    }
+    const p = inCluster(i, j) ? 0.55 : adjRoad(i, j) ? 0.32 : 0.12;
     if (rng() >= p) continue;
-    const rec = await builder.placeDirect(id(rand(T.trees, rng)), i, j, ri(rng, 0, 3), 'struct');
+    const yOff = onMount ? mountTop.get(k) : 0;
+    const rec = await builder.placeDirect(id(rand(T.trees, rng)), i, j, ri(rng, 0, 3), 'struct', yOff);
     if (rec) {
       rec.obj.scale.setScalar(0.85 + rng() * 0.35);
       builder._genUids.push(rec.uid);
