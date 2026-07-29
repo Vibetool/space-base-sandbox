@@ -10,12 +10,9 @@ const S = CELL / 3;          // 道路瓦片缩放 4/3
 export const Y_PAVE = 0.63 * S;  // 0.84      米黄地表基准(全图地面高度)
 const Y_GRASS = 0.55 * S;    // 0.7333    草地面(比米黄低 0.107,天然路缘)
 const TIER_STEP = 1.10 * S;  // 1.4667    坡道瓦片跨越的高差(0.55→1.65),坡度锁死约 20°
-const MAXTIER = 5;           // 山体最高层数
-// 山体用竖直崖壁堆叠:坡道瓦片只能做 20° 缓坡,靠堆草块才能做出又高又尖的山
-const BLOCK_H = 1.65 * S;    // 2.20   草块(36)的世界高度
-const RISE = 2;              // 每内缩 1 格升 2 块 → 约 48°,远陡于坡道的 20°
+const MAXTIER = 6;           // 山体最高层数(层高由坡道瓦片锁定,靠层数出高度)
 const MOUNT_COUNT = 3;       // 山的座数
-const MOUNT_MIN = 8, MOUNT_MAX = 11; // 基座尺寸(小一些,和地图比例协调)
+const MOUNT_MIN = 13, MOUNT_MAX = 16; // 基座尺寸:岛形内接半径小于矩形,需放大补回层数
 
 const T = {
   pave: 2,        // 纯米黄铺装(64 含白线会 z-fighting,勿用)
@@ -53,6 +50,29 @@ const SHORE_CNR = { SW: 0, SE: 1, NE: 2, NW: 3 }; // 池角,键=陆地所在角
 const BRIDGE_ROT = { NS: 0, EW: 1 };              // 桥,键=道路走向
 
 const DIRS = { E: [1, 0], W: [-1, 0], S: [0, 1], N: [0, -1] };
+
+// ── 山体角高度模型(glTF 顶点实测)──────────────────────────────────────────
+// 36/152/12/37 的顶面只有两种角高:本层顶(native 1.65 → 世界 2.2)与低一层顶
+// (native 0.55 → 世界 0.7333),差值 1.4667 == TIER_STEP;每条边的剖面都是两端
+// 角高的线性插值(12 号是以高角为顶点、半径 4 的锥面,边剖面同样线性)。
+// ⇒ 两格接缝严丝合缝 ⟺ 共享的那两个角高度相等。
+const CORNER_OFF = { NW: [-1, -1], NE: [1, -1], SW: [-1, 1], SE: [1, 1] };
+const SLOPE_SIDE = { 'NE,NW': 'N', 'SE,SW': 'S', 'NW,SW': 'W', 'NE,SE': 'E' }; // 两低角 → 低边
+const OUTER_ROT = { SW: 0, SE: 1, NE: 2, NW: 3 };   // 外凸角 12,键 = 唯一的"高角"
+
+// 角高度 = 该角周围 4 格 tier 的最小值(对称 ⇒ 相邻格自动算出同一个值)
+function cornerMask(tier, i, j) {
+  const tAt = (a, b) => tier.get(`${a},${b}`) || 0;
+  const t = tAt(i, j);
+  const lv = {};
+  for (const c in CORNER_OFF) {
+    const [dx, dy] = CORNER_OFF[c];
+    lv[c] = Math.min(t, tAt(i + dx, j), tAt(i, j + dy), tAt(i + dx, j + dy));
+  }
+  const top = Math.max(lv.NW, lv.NE, lv.SW, lv.SE);
+  const low = ['NE', 'NW', 'SE', 'SW'].filter((c) => lv[c] < top).sort();
+  return { top, low, saddle: low.length === 2 && !SLOPE_SIDE[low.join(',')] };
+}
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -116,7 +136,7 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
 
   const rng = mulberry32(seed);
   const noise = makeNoise(seed);
-  const R = 18;                                 // 36×36 格 = 144m(留出大山基座的空间)
+  const R = 22;                                 // 44×44 格 = 176m(3 座山 + 路网 + 水系都要放得下)
   const cells = new Map();                        // "i,j" → {n, rot, y};一格一件
   const put = (i, j, n, rot = 0, y = 0) => cells.set(`${i},${j}`, { n, rot, y });
   const at = (i, j) => cells.get(`${i},${j}`);
@@ -227,17 +247,21 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
   const mounts = [];
   {
     for (let m = 0; m < MOUNT_COUNT; m++) {
-      const mw = ri(rng, MOUNT_MIN, MOUNT_MAX), mh = ri(rng, MOUNT_MIN, MOUNT_MAX);
-      for (let t = 0; t < 200; t++) {
-        const mi = ri(rng, -R + 2, R - 2 - mw), mj = ri(rng, -R + 2, R - 2 - mh);
-        let ok = true;
-        for (let i = mi - 1; i <= mi + mw && ok; i++)
-          for (let j = mj - 1; j <= mj + mh && ok; j++) if (water.has(`${i},${j}`)) ok = false;
-        for (const o of mounts) {
-          if (!ok) break;
-          if (!(mi + mw < o.i - 2 || mi > o.i + o.w + 1 || mj + mh < o.j - 2 || mj > o.j + o.h + 1)) ok = false;
+      let placedMount = false;
+      // 放不下就逐步缩小再试,保证 MOUNT_COUNT 座都能落位
+      for (let shrink = 0; shrink <= 3 && !placedMount; shrink++) {
+        const mw = ri(rng, MOUNT_MIN, MOUNT_MAX) - shrink, mh = ri(rng, MOUNT_MIN, MOUNT_MAX) - shrink;
+        for (let t = 0; t < 250; t++) {
+          const mi = ri(rng, -R + 2, R - 2 - mw), mj = ri(rng, -R + 2, R - 2 - mh);
+          let ok = true;
+          for (let i = mi - 1; i <= mi + mw && ok; i++)
+            for (let j = mj - 1; j <= mj + mh && ok; j++) if (water.has(`${i},${j}`)) ok = false;
+          for (const o of mounts) {
+            if (!ok) break;
+            if (!(mi + mw < o.i - 2 || mi > o.i + o.w + 1 || mj + mh < o.j - 2 || mj > o.j + o.h + 1)) ok = false;
+          }
+          if (ok) { mounts.push({ i: mi, j: mj, w: mw, h: mh }); placedMount = true; break; }
         }
-        if (ok) { mounts.push({ i: mi, j: mj, w: mw, h: mh }); break; }
       }
     }
   }
@@ -337,6 +361,20 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     return out;
   };
 
+  // 8 邻域腐蚀:山体分层必须用它。4 邻域腐蚀 == 曼哈顿距离变换,45° 斜边上对角格
+  // 会差 2 层,而瓦片只提供"本层/低一层"两种角高 → 差 2 层的角无件可放,必然裂开。
+  // 8 邻域腐蚀 == 切比雪夫距离变换,保证任意 2×2 窗口内层差 ≤ 1。
+  const erode8 = (set) => {
+    const out = new Set();
+    for (const k of set) {
+      const [i, j] = k.split(',').map(Number);
+      let ok = true;
+      for (let a = -1; a <= 1 && ok; a++) for (let b = -1; b <= 1 && ok; b++) if (!set.has(`${i + a},${j + b}`)) ok = false;
+      if (ok) out.add(k);
+    }
+    return out;
+  };
+
   // 在给定格集合里找最大内接轴对齐矩形(直方图法)
   const maxRect = (set) => {
     const list = [...set].map((k) => k.split(',').map(Number));
@@ -363,22 +401,21 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     return best;
   };
 
-  const plateaus = [], lawns = [], mountStacks = [];
-  // 4a) 山丘:不规则轮廓 + 腐蚀分层 + 竖直崖壁堆叠
-  //     草块是纯立方体,任何形状都能堆(不像坡道瓦片有"无解格"限制),所以轮廓可以自由不规则
+  const plateaus = [], lawns = [];
+  // 4a) 山丘:不规则轮廓 + 腐蚀分层 + 草坡梯田(坡道瓦片,不是堆方块)
   for (const m of mounts) {
-    // 不规则轮廓:基座内取 3~4 个互相交叠的子矩形取并集,得到有机形状
+    // 有机岛形:椭圆径向场 + 平滑噪声扰动半径。轮廓天生圆润带凹凸,
+    // 距离变换随之收敛成锥体而非台地。不要再额外啃外轮廓 ——
+    // 坡度被瓦片锁死在 20°,山高 = 半宽 × 0.364,每削掉一圈就矮一层
     const blob = new Set();
-    const nSub = ri(rng, 3, 4);
-    for (let s = 0; s < nSub; s++) {
-      const sw = ri(rng, Math.ceil(m.w * 0.55), m.w), sh = ri(rng, Math.ceil(m.h * 0.55), m.h);
-      const si = m.i + ri(rng, 0, m.w - sw), sj = m.j + ri(rng, 0, m.h - sh);
-      for (let i = si; i < si + sw; i++) for (let j = sj; j < sj + sh; j++) {
-        const k = `${i},${j}`;
-        if (inb(i, j) && !water.has(k) && !road.has(k)) blob.add(k);
-      }
+    const cx = m.i + (m.w - 1) / 2, cy = m.j + (m.h - 1) / 2;
+    for (let i = m.i; i < m.i + m.w; i++) for (let j = m.j; j < m.j + m.h; j++) {
+      const k = `${i},${j}`;
+      if (!inb(i, j) || water.has(k) || road.has(k)) continue;
+      const d = Math.hypot((i - cx) / (m.w / 2), (j - cy) / (m.h / 2));
+      if (Math.pow(d, 1.6) + (noise(i, j, 4) - 0.5) * 0.5 < 1) blob.add(k);
     }
-    if (blob.size < 16) continue;
+    if (blob.size < 16) continue;   // 被水/路啃剩太小,放弃这座山
 
     // 山脚外一圈铺平草地,让崖壁落在草面而不是直接怼在铺装上
     for (const k of blob) {
@@ -391,39 +428,47 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
       }
     }
 
-    // 腐蚀分层:tier = 该格能撑过几轮腐蚀 → 轮廓天然跟随不规则外形
+    // 腐蚀分层 + 去鞍点:tier = 切比雪夫距离变换(8 邻域腐蚀)。
+    // "两个相对的对角更低"(鞍点)这一角配置没有对应瓦片 → 把这些格剔出山体再重算距离
+    // 变换,直到不再出现。实测剔除量 < 0.2%,山形几乎不变。
+    const hill = new Set(blob);
     const tier = new Map();
-    let cur = blob, level = 1;
-    while (cur.size && level <= MAXTIER) {
-      for (const k of cur) tier.set(k, level);
-      cur = erode(cur);
-      level++;
+    for (let guard = 0; guard < 20; guard++) {
+      tier.clear();
+      let cur = hill, level = 1;
+      while (cur.size && level <= MAXTIER) {
+        for (const k of cur) tier.set(k, level);
+        cur = erode8(cur);
+        level++;
+      }
+      const bad = [...tier.keys()].filter((k) => {
+        const [i, j] = k.split(',').map(Number);
+        return cornerMask(tier, i, j).saddle;
+      });
+      if (!bad.length) break;
+      for (const k of bad) hill.delete(k);
     }
-    // 用平滑噪声成片削低 → 打破规整同心环,做出山脊与凹谷(逐格独立随机会变成迷宫)
-    for (const k of blob) {
-      const [i, j] = k.split(',').map(Number);
-      const t = tier.get(k) || 1;
-      if (t <= 1) continue;
-      const n = noise(i, j, 4);
-      if (n < 0.34) tier.set(k, Math.max(1, t - 2));
-      else if (n < 0.48) tier.set(k, t - 1);
-    }
-    const tierAt = (i, j) => tier.get(`${i},${j}`) || 0;
-    const topOf = (i, j) => (tierAt(i, j) - 1) * RISE * BLOCK_H + BLOCK_H;
+    if (!tier.size) continue;      // 去鞍点后山体空了
+    // 台面顶高(树用):角高度模型下,台面 = 该格四角的最高层
+    const topOf = (i, j) => (cornerMask(tier, i, j).top - 1) * TIER_STEP + 1.65 * S;
 
-    // 每格填一列草块:从"最低邻格的顶"填到自己的顶(下方被邻格挡住,不必填到地面)
-    const cells = [], stacks = [];
+    const cells = [];
     for (const k of blob) {
       const [i, j] = k.split(',').map(Number);
-      const t = tierAt(i, j);
-      const minNbr = Math.min(...Object.values(DIRS).map(([di, dj]) => tierAt(i + di, j + dj)));
-      const topY = (t - 1) * RISE * BLOCK_H;                  // 最上面一块的底面
-      const fromY = Math.max(0, (minNbr - 1) * RISE * BLOCK_H); // 按最低邻格算,任意层差都不会露空
-      for (let y = fromY; y <= topY + 1e-6; y += BLOCK_H) stacks.push({ i, j, y });
+      if (!hill.has(k)) { put(i, j, T.grass, 0, 0); green.add(k); continue; }  // 被剔掉的鞍点格
+      const { top, low } = cornerMask(tier, i, j);
+      if (top < 1) { put(i, j, T.grass, 0, 0); green.add(k); continue; }       // 四角都落到地面
+      const y = (top - 1) * TIER_STEP;
+      let tile;
+      if (low.length === 0) tile = { n: T.plateau, rot: 0 };                            // 四角同高 → 平顶
+      else if (low.length === 1) tile = { n: T.slopeInner, rot: CURVE_ROT[low[0]] };    // 1 低角 → 内凹角
+      else if (low.length === 3) tile = { n: T.slopeOuter,                              // 3 低角 → 外凸角
+        rot: OUTER_ROT[['NW', 'NE', 'SW', 'SE'].find((c) => !low.includes(c))] };
+      else tile = { n: T.slope, rot: SLOPE_ROT[SLOPE_SIDE[low.join(',')]] };            // 2 相邻低角 → 直坡
+      put(i, j, tile.n, tile.rot, y);
       green.add(k); cells.push(k);
     }
     plateaus.push({ cells, topOf });
-    mountStacks.push(...stacks);
   }
 
   // 4b) 平草坪:中等街区 1~2 个
@@ -451,13 +496,6 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     if (++n % 150 === 0) await new Promise((r) => setTimeout(r, 0)); // 让出主线程(rAF 在标签页隐藏时不触发)
   }
 
-  // 5.5) 山体草块堆叠(每块用独立图层名,绕开"每格每层只能一件"的限制)
-  for (const s of mountStacks) {
-    const layer = `hill${Math.round(s.y / BLOCK_H)}`;
-    const rec = await builder.placeDirect(id(T.plateau), s.i, s.j, 0, layer, s.y);
-    if (rec) { builder._genUids.push(rec.uid); placed++; } else skipped++;
-    if (++n % 150 === 0) await new Promise((r) => setTimeout(r, 0));
-  }
 
   // ── 6) 树:成簇 + 行道树 ──────────────────────
   let trees = 0;
@@ -503,5 +541,6 @@ export async function generateMap(builder, seed = Date.now() % 100000) {
     }
   }
 
-  return { placed, skipped, trees, bridges, plateaus: plateaus.length, lawns: lawns.length, water: water.size, seed };
+  return { placed, skipped, trees, bridges, plateaus: plateaus.length, lawns: lawns.length,
+    water: water.size, seed };
 }

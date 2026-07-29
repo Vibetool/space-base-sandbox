@@ -24,10 +24,11 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xe9e6dd);
 scene.fog = null;
 
-// 环境光调高:渠壁内侧面等竖直面在掠射角下不会暗成深蓝(会被误看成水面在下斜)
-scene.add(new THREE.HemisphereLight(0xffffff, 0xdedad0, 1.55));
-const sun = new THREE.DirectionalLight(0xfff6e8, 0.8);
-sun.position.set(48, 92, 62);
+// 光比:半球光只管"不让竖直面暗成深蓝",主导权交给方向光 —— 草坡瓦片被锁死在 20°,
+// 半球光按 normal.y 着色,20° 坡与平面只差 3%,半球光一强就把整座山冲成一块平绿板
+scene.add(new THREE.HemisphereLight(0xffffff, 0xdedad0, 1.05));
+const sun = new THREE.DirectionalLight(0xfff6e8, 1.45);
+sun.position.set(58, 58, 74); // 太阳压低到约 33°:坡面向阳/背阳的明暗差拉开到 2 倍以上
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.left = -110; sun.shadow.camera.right = 110;
@@ -37,7 +38,7 @@ sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.02;
 scene.add(sun);
 // 补光改中性白(原先偏蓝会把阴影染成 navy),并加强以提亮渠壁背光面
-const fill = new THREE.DirectionalLight(0xffffff, 0.5);
+const fill = new THREE.DirectionalLight(0xffffff, 0.42);
 fill.position.set(-60, 45, -55);
 scene.add(fill);
 
