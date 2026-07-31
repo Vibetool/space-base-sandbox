@@ -16,12 +16,36 @@ export class GodCamera {
       this.dist = THREE.MathUtils.clamp(this.dist * (e.deltaY > 0 ? 1.12 : 0.89), 12, 220);
     }, { passive: false });
 
+    // 触屏:单指拖 = 旋转,双指捏合 = 缩放、双指移动 = 平移(与鼠标分支互不干扰)
+    this.touches = new Map(); // pointerId → {x,y},只收录从画布按下的手指
+    this.pinch = null;
     let drag = null;
     dom.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'touch') {
+        this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (this.touches.size === 1) drag = { mode: 'rot', x: e.clientX, y: e.clientY, moved: 0 };
+        else { drag = null; this.pinch = null; } // 第二指落下 → 交给双指手势
+        return;
+      }
       if (e.button === 2) drag = { mode: 'rot', x: e.clientX, y: e.clientY, moved: 0 };
       else if (e.button === 1) { e.preventDefault(); drag = { mode: 'pan', x: e.clientX, y: e.clientY, moved: 0 }; }
     });
     window.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'touch') {
+        if (!this.touches.has(e.pointerId)) return; // 手指不是从画布按下的(在 UI 面板上)
+        this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (this.touches.size >= 2) {
+          const [a, b] = [...this.touches.values()];
+          const dist = Math.hypot(a.x - b.x, a.y - b.y);
+          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          if (this.pinch) {
+            this.dist = THREE.MathUtils.clamp(this.dist * (this.pinch.dist / Math.max(dist, 1)), 12, 220);
+            this.panBy(mid.x - this.pinch.mid.x, mid.y - this.pinch.mid.y);
+          }
+          this.pinch = { dist, mid };
+          return;
+        }
+      }
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.moved += Math.abs(dx) + Math.abs(dy);
@@ -33,10 +57,23 @@ export class GodCamera {
         this.panBy(dx, dy);
       }
     });
-    window.addEventListener('pointerup', () => {
+    // pointercancel 必须与 pointerup 同路清理:浏览器接管手势时只发 cancel,不清会"粘住"
+    const endPointer = (e) => {
+      if (e.pointerType === 'touch' && this.touches.has(e.pointerId)) {
+        this.touches.delete(e.pointerId);
+        this.pinch = null;
+        if (this.touches.size >= 1) {
+          // 双指抬起一指:剩余手指无缝接管单指旋转
+          const [p] = [...this.touches.values()];
+          drag = { mode: 'rot', x: p.x, y: p.y, moved: drag ? drag.moved : 99 };
+          return;
+        }
+      }
       if (drag) this.lastDragMoved = drag.moved;
       drag = null;
-    });
+    };
+    window.addEventListener('pointerup', endPointer);
+    window.addEventListener('pointercancel', endPointer);
     window.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT') return;
       this.keys.add(e.code);

@@ -2,8 +2,52 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- 禁浏览器缩放:双指捏合留给镜头,双击别触发页面放大(iOS 忽略 user-scalable,靠 touch-action 补) -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="description" content="星际基地·沙盒建造:3D 上帝视角拼装太空舱、修路、造地形,打开即玩,无需下载。" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="星际基地 · 沙盒建造" />
+<meta property="og:description" content="3D 上帝视角沙盒建造小游戏,打开即玩" />
+<meta property="og:image" content="https://vibetool.github.io/space-base-sandbox/preview.png" />
+<link rel="icon" type="image/png" href="/preview.png" />
 <title>星际基地 · 沙盒建造</title>
+<script>
+// 启动看门狗 + 老内核兜底。必须保持 ES5:内核越老越需要这段能跑起来。
+(function () {
+  function overlay(msg) {
+    var box = document.getElementById('fatalBox');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'fatalBox';
+      box.style.cssText = 'position:fixed;left:0;right:0;top:0;bottom:0;z-index:999;background:#12141c;color:#e8e9f5;display:-webkit-flex;display:flex;-webkit-flex-direction:column;flex-direction:column;-webkit-align-items:center;align-items:center;-webkit-justify-content:center;justify-content:center;padding:32px;text-align:center;font-size:14px;line-height:1.7';
+      (document.body || document.documentElement).appendChild(box);
+    }
+    box.innerHTML = '<p style="max-width:340px">⚠️ ' + msg + '</p>'
+      + '<button onclick="location.reload()" style="margin-top:16px;background:#7b6cff;color:#fff;border:0;border-radius:8px;padding:10px 28px;font-size:15px">重新加载</button>';
+  }
+  window.__fatal = overlay;
+  window.__fatalClear = function () {
+    var box = document.getElementById('fatalBox');
+    if (box && box.parentNode) box.parentNode.removeChild(box);
+  };
+  // 20 秒还没进游戏就翻牌,别让用户对着"正在加载模块…"干等
+  setTimeout(function () {
+    if (!window.__booted) overlay('加载超时:网络太慢,或浏览器内核过旧。请检查网络后重试,或升级微信 / 改用系统浏览器打开');
+  }, 20000);
+  // 启动阶段的脚本错误(老内核语法不支持等)翻译成人话
+  window.addEventListener('error', function (e) {
+    if (!window.__booted && e && e.message) overlay('加载出错:' + e.message);
+  });
+  // 老内核缺 Array/String.prototype.at(three r166 会用到)
+  function atImpl(n) {
+    n = Math.trunc(n) || 0;
+    if (n < 0) n += this.length;
+    return (n < 0 || n >= this.length) ? undefined : this[n];
+  }
+  if (!Array.prototype.at) Object.defineProperty(Array.prototype, 'at', { value: atImpl, writable: true, configurable: true });
+  if (!String.prototype.at) Object.defineProperty(String.prototype, 'at', { value: atImpl, writable: true, configurable: true });
+})();
+</script>
 <style>
   :root {
     --bg: #12141c;
@@ -15,9 +59,19 @@
     --muted: #8d92b3;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; color: var(--text); }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden; background: var(--bg);
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; color: var(--text);
+    /* 移动端:禁微信字体缩放、禁下拉回弹、禁长按弹"保存图片/复制"菜单、去点击高亮 */
+    -webkit-text-size-adjust: 100%; text-size-adjust: 100%;
+    overscroll-behavior: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
   #app { position: fixed; inset: 0; }
-  canvas.game { display: block; }
+  /* touch-action:none 是触屏手势的前提:不写,单指拖会被浏览器当页面滚动接走 */
+  canvas.game { display: block; touch-action: none; }
 
   /* 顶部工具栏 */
   #toolbar {
@@ -25,7 +79,8 @@
     max-width: calc(100vw - 24px);
     display: flex; gap: 8px; align-items: center;
     background: var(--panel); border: 1px solid var(--panel-border);
-    border-radius: 12px; padding: 8px 12px; backdrop-filter: blur(8px);
+    border-radius: 12px; padding: 8px 12px;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); /* iOS≤17 只认 -webkit- */
     z-index: 10; box-shadow: 0 4px 24px #0008;
   }
   #toolbar .title { font-weight: 700; font-size: 14px; margin-right: 6px; letter-spacing: 1px; white-space: nowrap; }
@@ -47,8 +102,15 @@
   #palette {
     position: fixed; top: 70px; left: 12px; bottom: 46px; width: 292px;
     background: var(--panel); border: 1px solid var(--panel-border);
-    border-radius: 14px; backdrop-filter: blur(8px); z-index: 10;
+    border-radius: 14px; z-index: 10;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
     display: flex; flex-direction: column; box-shadow: 0 4px 24px #0008;
+  }
+  /* 抽屉把手:仅手机断点显示 */
+  #palToggle {
+    display: none; align-items: center; justify-content: center; gap: 6px;
+    height: 42px; flex: none; font-size: 13px; font-weight: 600; color: var(--text);
+    cursor: pointer; border-bottom: 1px solid var(--panel-border);
   }
   /* 道路分类:面板加宽,卡片更大更清楚 */
   #palette.road-mode { width: 400px; }
@@ -121,6 +183,40 @@
   #loading .bar { width: 240px; height: 6px; background: #262a3e; border-radius: 3px; overflow: hidden; }
   #loading .bar i { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .2s; }
   #loading p { color: var(--muted); font-size: 13px; }
+
+  /* ── 手机适配(≤700px):工具栏换行、调色板改底部抽屉、触控目标加大 ── */
+  @media (max-width: 700px) {
+    #toolbar {
+      left: 8px; right: 8px; transform: none; max-width: none;
+      flex-wrap: wrap; justify-content: center; gap: 6px; padding: 6px 8px;
+    }
+    #toolbar .sep { display: none; }
+    .btn { padding: 11px 12px; font-size: 13px; }        /* 高约 44px,达最小触控标准 */
+    #tabs .tab { padding: 10px 12px; font-size: 13px; }
+    #subtabs .tab.sub { padding: 9px 11px; font-size: 12px; }
+    #tabs, #subtabs { gap: 6px; }
+
+    /* 调色板:左侧 292/400px 固定栏在手机上盖死画布,改成可收起的底部抽屉 */
+    #palette, #palette.road-mode {
+      left: 0; right: 0; top: auto; bottom: 0; width: auto;
+      height: min(46vh, 430px); border-radius: 14px 14px 0 0;
+      transition: transform .22s;
+    }
+    #palette.collapsed { transform: translateY(calc(100% - 42px)); }
+    #palToggle { display: flex; }
+    #items { grid-template-columns: repeat(4, 1fr); grid-auto-rows: 76px; }
+    #items.wide { grid-template-columns: repeat(3, 1fr); grid-auto-rows: 104px; gap: 8px; padding: 8px; }
+    #items.wide .item { height: 104px; }
+
+    /* 键鼠操作说明在手机上全不适用;反馈信息改到顶部当 toast */
+    #status { left: 8px; right: 8px; bottom: auto; top: 112px; justify-content: center; }
+    #status .hint { display: none; }
+    #status .msg { font-size: 13px; text-shadow: 0 1px 6px #000c; }
+  }
+  /* 触屏(无 hover):吸附提示别跟手指跑(会被手遮住),固定顶部居中 */
+  @media (hover: none) {
+    #snapTip { left: 50% !important; top: 74px !important; transform: translateX(-50%); }
+  }
 </style>
 </head>
 <body>
@@ -141,6 +237,7 @@
   </div>
 
   <div id="palette">
+    <div id="palToggle">📦 模块面板 ▴▾</div>
     <div id="tabs"></div>
     <div id="subtabs"></div>
     <div id="items"></div>

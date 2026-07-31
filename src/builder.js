@@ -337,13 +337,18 @@ export class Builder {
   }
 
   update(dt) {
-    // 滑动门开关动画(向上滑入门框)
+    // 滑动门开关动画(向上滑入门框);返回"是否有门在动",供渲染层决定要不要重画阴影
+    let moving = false;
     for (const rec of this.records.values()) {
       if (!rec.doorNode) continue;
       const target = rec.doorBaseY + (rec.doorOpen ? 3.4 : 0);
       const y = rec.doorNode.position.y;
-      rec.doorNode.position.y = THREE.MathUtils.damp(y, target, 8, dt);
+      if (Math.abs(target - y) > 0.002) {
+        rec.doorNode.position.y = THREE.MathUtils.damp(y, target, 8, dt);
+        moving = true;
+      }
     }
+    return moving;
   }
 
   // ── 序列化 ────────────────────────────

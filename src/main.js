@@ -11,11 +11,34 @@ const app = document.getElementById('app');
 const statusMsg = document.getElementById('statusMsg');
 const snapTip = document.getElementById('snapTip');
 
+// 触屏设备:交互方式与渲染开销都按此分流
+const IS_TOUCH = matchMedia('(pointer: coarse)').matches;
+
 // ── 渲染器 / 场景 ──────────────────────
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// 创建可能失败(WebGL2 不可用 / GPU 进内核黑名单),失败必须给人话提示,不能卡在加载页
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: !IS_TOUCH }); // 移动端关 MSAA:省约 40MB 显存
+} catch (err) {
+  window.__fatal?.('此设备或浏览器不支持 WebGL2,无法运行 3D 场景。请升级微信,或用系统浏览器打开');
+  throw err;
+}
+renderer.setPixelRatio(Math.min(devicePixelRatio, IS_TOUCH ? 1.5 : 2));
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = IS_TOUCH ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap; // 16 tap 软阴影移动端扛不住
+// 场景是静态的,阴影只在变更时重画(阴影 pass 占全部 draw call 的 84%,每帧重画纯浪费)
+renderer.shadowMap.autoUpdate = false;
+renderer.shadowMap.needsUpdate = true;
+const dirtyShadow = () => { renderer.shadowMap.needsUpdate = true; };
+// 微信切后台 / 显存吃紧会回收 GL 上下文,不处理就是永久黑屏且无任何提示
+renderer.domElement.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  window.__fatal?.('渲染中断:切后台或显存不足导致上下文丢失');
+});
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  window.__fatalClear?.();
+  dirtyShadow();
+});
 renderer.domElement.classList.add('game');
 app.appendChild(renderer.domElement);
 
@@ -90,6 +113,10 @@ const palette = new Palette((kind) => {
   setMode('build');
   builder.pendingKind = kind;
   builder.select(kind);
+  // 窄屏上调色板是底部抽屉:选完模块自动收起,露出画布好放置
+  if (kind && matchMedia('(max-width: 700px)').matches) {
+    document.getElementById('palette').classList.add('collapsed');
+  }
   if (kind) {
     const d = CATALOG[kind];
     if (d.type === 'door') say('门会自动磁吸建筑边缘;对准墙可直接替换嵌入', 3600);
@@ -99,18 +126,28 @@ const palette = new Palette((kind) => {
 });
 
 document.getElementById('rotBtn').onclick = () => builder.rotate();
+document.getElementById('palToggle').onclick = () => {
+  document.getElementById('palette').classList.toggle('collapsed');
+};
 document.getElementById('saveBtn').onclick = () => {
-  localStorage.setItem('space-sandbox-save', builder.serialize());
-  say('✅ 已保存到浏览器');
+  // 微信 WebView 里 localStorage 可能被禁/已满,裸调用会静默炸掉
+  try {
+    localStorage.setItem('space-sandbox-save', builder.serialize());
+    say('✅ 已保存到本机浏览器(清理微信缓存会丢失)', 3000);
+  } catch {
+    say('⛔ 保存失败:浏览器存储不可用或已满');
+  }
 };
 document.getElementById('loadBtn').onclick = async () => {
   const data = localStorage.getItem('space-sandbox-save');
   if (!data) return say('没有找到存档');
   await builder.deserialize(data);
+  dirtyShadow();
   say('✅ 已载入存档');
 };
 document.getElementById('clearBtn').onclick = () => {
   builder.clearAll();
+  dirtyShadow();
   say('已清空场景');
 };
 let generating = false;
@@ -118,6 +155,7 @@ document.getElementById('genBtn').onclick = async () => {
   if (generating) return;
   generating = true;
   say('🗺️ 正在生成地图…', 0);
+  renderer.shadowMap.autoUpdate = true; // 生成期间瓦片持续入场,恢复逐帧阴影
   try {
     const r = await generateMap(builder);
     say(`🗺️ 地图生成完毕:${r.placed} 块地形 · ${r.trees} 棵树(种子 ${r.seed})`, 4000);
@@ -125,13 +163,18 @@ document.getElementById('genBtn').onclick = async () => {
     console.error(err);
     say('⛔ 生成失败,详见控制台');
   }
+  renderer.shadowMap.autoUpdate = false;
+  dirtyShadow();
   generating = false;
 };
 
-// ── 鼠标交互 ───────────────────────────
+// ── 鼠标 / 触屏交互 ────────────────────
 const mouse = new THREE.Vector2();
-let mouseClient = { x: 0, y: 0 };
+// 初值取屏幕中心:触屏没有 hover,(0,0) 会让首次预览算在被工具栏压住的左上角
+let mouseClient = { x: innerWidth / 2, y: innerHeight / 2 };
 let downInfo = null;
+let canvasTouch = false; // 画布上有手指按着(触屏预览只在此期间计算)
+let lpTimer = 0, lpFired = false; // 长按开关门(触屏没有可靠的 dblclick)
 
 function pickGround(e) {
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
@@ -155,23 +198,54 @@ let overUI = false;
 window.addEventListener('pointermove', (e) => {
   overUI = e.target !== renderer.domElement;
   if (!overUI) mouseClient = { x: e.clientX, y: e.clientY };
+  // 手指一旦拖开就不再是"长按",取消开门计时
+  if (downInfo && Math.hypot(e.clientX - downInfo.x, e.clientY - downInfo.y) > 10) clearTimeout(lpTimer);
+});
+// 触屏上 pointermove 只在按下时触发,overUI/坐标必须在按下时同步,否则一直用上一次的值
+window.addEventListener('pointerdown', (e) => {
+  overUI = e.target !== renderer.domElement;
+  if (!overUI) mouseClient = { x: e.clientX, y: e.clientY };
 });
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
-  downInfo = { x: e.clientX, y: e.clientY, btn: e.button };
+  if (!e.isPrimary) { downInfo = null; clearTimeout(lpTimer); return; } // 第二指落下:这是缩放手势,取消点击/长按
+  downInfo = { x: e.clientX, y: e.clientY, btn: e.button, touch: e.pointerType === 'touch' };
+  lpFired = false;
+  if (e.pointerType === 'touch') {
+    canvasTouch = true;
+    clearTimeout(lpTimer);
+    lpTimer = setTimeout(() => {
+      // 长按 550ms 且未拖动 = 开/关门(触屏的 dblclick 会被浏览器双击缩放吃掉)
+      const uid = pickObject(e);
+      const rec = uid && builder.records.get(uid);
+      if (rec && builder.toggleDoor(uid)) {
+        lpFired = true;
+        say(rec.doorOpen ? '🚪 门已开启' : '🚪 门已关闭', 1200);
+        if (navigator.vibrate) navigator.vibrate(20);
+      }
+    }, 550);
+  }
 });
+// 手指在画布外抬起 / 手势被浏览器取消:清掉遗留状态,避免下一次点击误判
+for (const t of ['pointerup', 'pointercancel']) {
+  window.addEventListener(t, () => { canvasTouch = false; clearTimeout(lpTimer); downInfo = null; });
+}
 
 renderer.domElement.addEventListener('pointerup', (e) => {
+  clearTimeout(lpTimer);
+  canvasTouch = false;
   if (!downInfo) return;
+  if (lpFired) { downInfo = null; return; } // 长按已消费这次触摸,别再放置
   const moved = Math.hypot(e.clientX - downInfo.x, e.clientY - downInfo.y);
   const btn = downInfo.btn;
+  const slop = downInfo.touch ? 14 : 6; // 手指点击天然抖动 8~15px,6px 会大量误判成拖拽
   downInfo = null;
-  if (moved > 6) return; // 拖拽不算点击
+  if (moved > slop) return; // 拖拽不算点击
 
   if (btn === 0) {
     if (mode === 'delete') {
       const uid = pickObject(e);
-      if (uid && builder.remove(uid)) say('已拆除');
+      if (uid && builder.remove(uid)) { dirtyShadow(); say('已拆除'); }
       return;
     }
     if (builder.selected) {
@@ -182,13 +256,13 @@ renderer.domElement.addEventListener('pointerup', (e) => {
       if (!builder.plan) return;
       const wasReplace = builder.plan.replace;
       const rec = builder.place();
-      if (rec) say(wasReplace ? '🚪 已替换墙体,门严丝合缝嵌入!' : `已放置:${CATALOG[rec.kind].name}`, wasReplace ? 3000 : 1500);
+      if (rec) { dirtyShadow(); say(wasReplace ? '🚪 已替换墙体,门严丝合缝嵌入!' : `已放置:${CATALOG[rec.kind].name}`, wasReplace ? 3000 : 1500); }
       else say('⛔ 此处无法放置');
     }
   } else if (btn === 2) {
     // 右键点击(未拖拽)= 拆除
     const uid = pickObject(e);
-    if (uid && builder.remove(uid)) say('已拆除');
+    if (uid && builder.remove(uid)) { dirtyShadow(); say('已拆除'); }
   }
 });
 
@@ -199,6 +273,9 @@ renderer.domElement.addEventListener('dblclick', (e) => {
     if (rec && builder.toggleDoor(uid)) say(rec.doorOpen ? '🚪 门已开启' : '🚪 门已关闭', 1200);
   }
 });
+
+// 面板/文字上的长按也别弹"保存图片/复制"系统菜单(画布上的已由 camera.js 拦截)
+document.addEventListener('contextmenu', (e) => e.preventDefault());
 
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyR') builder.rotate();
@@ -220,10 +297,11 @@ function tick() {
   requestAnimationFrame(tick);
   const dt = Math.min(clock.getDelta(), 0.05);
   cam.update(dt);
-  builder.update(dt);
+  if (builder.update(dt)) dirtyShadow(); // 门在动的期间逐帧重画阴影
 
-  // 幽灵吸附预览(鼠标在 UI 面板上时隐藏)
-  if (mode === 'build' && builder.selected && !overUI) {
+  // 幽灵吸附预览(鼠标在 UI 面板上时隐藏)。
+  // 触屏没有 hover,只在手指按住画布时计算 —— 空闲帧省掉全场景 raycast
+  if (mode === 'build' && builder.selected && !overUI && (!IS_TOUCH || canvasTouch)) {
     const p = pickGround({ clientX: mouseClient.x, clientY: mouseClient.y });
     const plan = p ? builder.updateHover(p) : null;
     if (plan && plan.valid && (plan.replace || plan.snapped)) {
@@ -244,19 +322,31 @@ function tick() {
 }
 
 // ── 启动:预热常用模型,进度条 ─────────
+// 注意:不能用顶层 await —— 老安卓微信内核(Chrome<89)解析期就报错,整包白屏
 const WARMUP = [
   'template-floor', 'template-wall', 'gate-door', 'room-small', 'corridor',
   'template-floor-big', 'gate', 'corridor-corner', 'road-001', 'road-002',
 ];
-const loadFill = document.getElementById('loadFill');
-const loadText = document.getElementById('loadText');
-let done = 0;
-await Promise.all(WARMUP.map(async (k) => {
-  try { await loadPiece(k); } catch (err) { console.warn('预热失败', k, err); }
-  done++;
-  loadFill.style.width = `${(done / WARMUP.length) * 100}%`;
-  loadText.textContent = `正在加载模块… ${done}/${WARMUP.length}`;
-}));
-document.getElementById('loading').remove();
-say('🛰️ 欢迎!从左侧选择模块开始建造', 4000);
-tick();
+async function boot() {
+  const loadFill = document.getElementById('loadFill');
+  const loadText = document.getElementById('loadText');
+  let done = 0;
+  const warm = Promise.all(WARMUP.map(async (k) => {
+    try { await loadPiece(k); } catch (err) { console.warn('预热失败', k, err); }
+    done++;
+    loadFill.style.width = `${(done / WARMUP.length) * 100}%`;
+    loadText.textContent = `正在加载模块… ${done}/${WARMUP.length}`;
+  }));
+  // 弱网兜底:预热 15 秒没完也进游戏,缺的模型用到时再加载
+  await Promise.race([warm, new Promise((r) => setTimeout(r, 15000))]);
+  document.getElementById('loading').remove();
+  window.__booted = true; // 通知 index.html 的看门狗:启动成功
+  say(IS_TOUCH
+    ? '👆 单指拖动转视角 · 双指缩放/平移 · 点击放置 · 长按门开/关'
+    : '🛰️ 欢迎!从左侧选择模块开始建造', IS_TOUCH ? 6500 : 4000);
+  tick();
+}
+boot().catch((err) => {
+  console.error(err);
+  window.__fatal?.(`初始化失败:${(err && err.message) || err}`);
+});
